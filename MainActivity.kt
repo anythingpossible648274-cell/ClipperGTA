@@ -47,8 +47,13 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
 
         Thread {
+            busy(true)
             try { YoutubeDL.getInstance().init(application); FFmpeg.getInstance().init(application) }
             catch (e: Exception) { say("Setup failed: ${e.message}") }
+            say("Updating the downloader (needs internet, up to a minute)...")
+            try { YoutubeDL.getInstance().updateYoutubeDL(application, YoutubeDL.UpdateChannel.NIGHTLY); say("Ready.") }
+            catch (e: Exception) { say("Ready (downloader update skipped).") }
+            busy(false)
         }.start()
 
         auto.setOnClickListener { start(url.text.toString().trim(), emptyList(), len.selectedItem.toString().toInt(), true) }
