@@ -1,6 +1,15 @@
 package io.clipper.app
 
-import android.app.Activity
+import android.Manifest
+import android.app.*
+import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
+import org.json.JSONArray
 import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
@@ -31,6 +40,14 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var list: LinearLayout
     private lateinit var go: Button
+    private lateinit var formView: ScrollView
+    private lateinit var clipsView: ScrollView
+    private lateinit var clipsBox: LinearLayout
+    private lateinit var clipsSummary: TextView
+    private var inClips = false
+    private var lastSig = ""
+    private val h = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable { override fun run() { if (inClips) { renderClips(); h.postDelayed(this, 1500) } } }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -77,13 +94,13 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); start(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked) }
+            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
         top.addView(go, LinearLayout.LayoutParams(0, dp(52), 1f).apply { rightMargin = dp(8) })
         top.addView(btn("My clips", CARD, WHITE) {
-            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video/*"))
+            showClips()
         }, LinearLayout.LayoutParams(0, dp(52), 1f))
         col.addView(top, lp(18))
         status = tv("", 14f, MUT).apply { setPadding(0, dp(12), 0, dp(4)) }
@@ -130,50 +147,195 @@ class MainActivity : Activity() {
         col.addView(c3, lp(14))
 
         col.addView(tv("Only clip streams you own or have permission to use.", 12f, MUT), lp(18))
-        setContentView(ScrollView(this).apply { setBackgroundColor(BG); isFillViewport = true; addView(col) })
+        formView = ScrollView(this).apply { setBackgroundColor(BG); isFillViewport = true; addView(col) }
+        setContentView(formView)
         addM()
         intent?.getStringExtra(Intent.EXTRA_TEXT)?.let { link.setText(it) }
 
-        Thread {
-            busy(true)
-            try { YoutubeDL.getInstance().init(application); FFmpeg.getInstance().init(application) }
-            catch (e: Exception) { say("Setup failed: ${e.message}") }
-            say("Updating the downloader (needs internet, up to a minute)...")
-            try { YoutubeDL.getInstance().updateYoutubeDL(application, YoutubeDL.UpdateChannel.NIGHTLY); say("Ready.") }
-            catch (e: Exception) { say("Ready (downloader update skipped).") }
-            busy(false)
-        }.start()
+        if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
 
     private fun say(t: String) = runOnUiThread { status.text = t }
-    private fun busy(b: Boolean) = runOnUiThread { go.isEnabled = !b; go.alpha = if (b) 0.5f else 1f }
-    private fun secs(t: String): Int {
-        val s = t.trim()
-        if (!s.contains(":")) { val n = s.toInt(); return n / 10000 * 3600 + n / 100 % 100 * 60 + n % 100 }
-        return s.split(":").fold(0) { a, p -> a * 60 + p.toInt() }
-    }
-    private fun fmt(s: Int) = "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60)
-
-    private fun start(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean) {
+    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean) {
         if (!Regex("(youtube\\.com|youtu\\.be|twitch\\.tv)/").containsMatchIn(link)) { say("Paste a YouTube or Twitch link first."); return }
-        if (!find && times.isEmpty()) { say("Add at least one moment like 1:47:42."); return }
-        busy(true); runOnUiThread { list.removeAllViews() }
-        Thread {
+        val now = System.currentTimeMillis()
+        fun entry(kind: String, start: Int, n: Int) = JSONObject().put("id", "$now-$n").put("kind", kind).put("link", link)
+            .put("start", start).put("length", length).put("caps", caps).put("state", "queued").put("note", "").put("path", "")
+        if (find) Store.add(this, entry("auto", 0, 0)) else times.forEachIndexed { i, t -> Store.add(this, entry("clip", t, i)) }
+        startForegroundService(Intent(this, ClipService::class.java))
+        showClips()
+    }
+
+    private fun showClips() {
+        val dens = resources.displayMetrics.density
+        fun dp(v: Int) = (v * dens).toInt()
+        if (!::clipsView.isInitialized) {
+            clipsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            clipsSummary = TextView(this).apply { textSize = 15f; setTextColor(0xFF8FA3C7.toInt()); setPadding(0, dp(8), 0, dp(12)) }
+            val back = Button(this).apply {
+                text = "Back"; isAllCaps = false; setTextColor(Color.WHITE)
+                background = GradientDrawable().apply { setColor(0xFF121C3D.toInt()); cornerRadius = dp(16).toFloat() }
+                setOnClickListener { hideClips() }
+            }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(36), dp(16), dp(24))
+                addView(TextView(this@MainActivity).apply { text = "My clips"; textSize = 32f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD) })
+                addView(clipsSummary); addView(clipsBox); addView(back)
+            }
+            clipsView = ScrollView(this).apply { setBackgroundColor(0xFF0A1128.toInt()); addView(col) }
+        }
+        inClips = true; lastSig = ""
+        setContentView(clipsView)
+        h.removeCallbacks(tick); h.post(tick)
+    }
+
+    private fun hideClips() { inClips = false; setContentView(formView) }
+    override fun onBackPressed() { if (inClips) hideClips() else super.onBackPressed() }
+    override fun onPause() { super.onPause(); h.removeCallbacks(tick) }
+    override fun onResume() { super.onResume(); if (inClips) { lastSig = ""; h.post(tick) } }
+
+    private fun renderClips() {
+        val a = Store.all(this)
+        if (a.toString() == lastSig) return
+        lastSig = a.toString()
+        val dens = resources.displayMetrics.density
+        var done = 0; var work = 0; var wait = 0
+        clipsBox.removeAllViews()
+        for (i in a.length() - 1 downTo 0) {
+            val o = a.getJSONObject(i); val st = o.getString("state"); val id = o.getString("id")
+            val title = if (o.getString("kind") == "auto") "Finding best moments" else "Clip at ${fmt(o.getInt("start"))}, ${o.getInt("length")} sec"
+            val bt = Button(this).apply {
+                isAllCaps = false; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                background = GradientDrawable().apply { setColor(if (st == "done") 0xFF4C8DFF.toInt() else 0xFF1B2A55.toInt()); cornerRadius = 16 * dens }
+            }
+            when (st) {
+                "done" -> { done++; bt.text = "Download: $title" + (if (o.optString("note").isNotEmpty()) "\n${o.getString("note")}" else "")
+                    bt.setOnClickListener {
+                        try { save(File(o.getString("path")), "Clip_${id}.mp4"); Toast.makeText(this, "Saved to Movies/Clipper", Toast.LENGTH_LONG).show() }
+                        catch (e: Exception) { Toast.makeText(this, "Could not save: ${e.message}", Toast.LENGTH_LONG).show() } } }
+                "working" -> { work++; bt.text = "In progress: $title\n${o.optString("note")}" }
+                "failed" -> { bt.text = "Failed: $title\n${o.optString("note")}\nTap to retry"
+                    bt.setOnClickListener { Store.update(this, id, "state" to "queued"); startForegroundService(Intent(this, ClipService::class.java)) } }
+                else -> { wait++; bt.text = "Waiting: $title" }
+            }
+            clipsBox.addView(bt, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = (8 * dens).toInt() })
+        }
+        clipsSummary.text = "$done ready  |  $work in progress  |  $wait waiting\nClips keep being made even if you close the app."
+    }
+
+    private fun save(f: File, name: String) {
+        val v = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Clipper")
+        }
+        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v)!!
+        contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
+    }
+}
+
+fun secs(t: String): Int {
+    val s = t.trim()
+    if (!s.contains(":")) { val n = s.toInt(); return n / 10000 * 3600 + n / 100 % 100 * 60 + n % 100 }
+    return s.split(":").fold(0) { a, p -> a * 60 + p.toInt() }
+}
+fun fmt(s: Int) = "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60)
+
+object Store {
+    private fun f(c: Context) = File(c.filesDir, "clips.json")
+    @Synchronized fun all(c: Context): JSONArray = try { JSONArray(f(c).readText()) } catch (e: Exception) { JSONArray() }
+    @Synchronized private fun put(c: Context, a: JSONArray) { f(c).writeText(a.toString()) }
+    @Synchronized fun add(c: Context, o: JSONObject) { val a = all(c); a.put(o); put(c, a) }
+    @Synchronized fun update(c: Context, id: String, vararg kv: Pair<String, Any>) {
+        val a = all(c)
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("id") == id) kv.forEach { o.put(it.first, it.second) } }
+        put(c, a)
+    }
+    @Synchronized fun remove(c: Context, id: String) {
+        val a = all(c); val n = JSONArray()
+        for (i in 0 until a.length()) if (a.getJSONObject(i).getString("id") != id) n.put(a.getJSONObject(i))
+        put(c, n)
+    }
+    @Synchronized fun nextQueued(c: Context): JSONObject? {
+        val a = all(c)
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "queued") return o }
+        return null
+    }
+}
+
+// Runs in the background (foreground service) so clips keep being made when the app is closed.
+class ClipService : Service() {
+    companion object { @Volatile var updated = false }
+    @Volatile private var running = false
+    private var cur = ""
+    private var lastNote = ""
+    private val subsCache = HashMap<String, JSONObject?>()
+
+    override fun onBind(i: Intent?): IBinder? = null
+
+    override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(NotificationChannel("clips", "Clip progress", NotificationManager.IMPORTANCE_LOW))
+        startForeground(1, notif("Starting..."), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        if (!running) {
+            running = true
+            Thread {
+                val wl = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "clipper:work")
+                wl.acquire(6 * 60 * 60 * 1000L)
+                try { work() } catch (e: Exception) { } finally { wl.release(); running = false; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+            }.start()
+        }
+        return START_STICKY
+    }
+
+    private fun notif(t: String): Notification = Notification.Builder(this, "clips")
+        .setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle("Clipper").setContentText(t).setOngoing(true).build()
+
+    private fun say(t: String) {
+        if (t == lastNote) return
+        lastNote = t
+        if (cur.isNotEmpty()) Store.update(this, cur, "note" to t)
+        val a = Store.all(this); var done = 0; var left = 0
+        for (i in 0 until a.length()) when (a.getJSONObject(i).getString("state")) { "done" -> done++; "failed" -> {}; else -> left++ }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(1, notif("$done ready, $left left. $t"))
+    }
+
+    private fun work() {
+        val a = Store.all(this)
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "working") Store.update(this, o.getString("id"), "state" to "queued") }
+        YoutubeDL.getInstance().init(application); FFmpeg.getInstance().init(application)
+        if (!updated) {
+            say("Updating the downloader...")
+            try { YoutubeDL.getInstance().updateYoutubeDL(application, YoutubeDL.UpdateChannel.NIGHTLY) } catch (e: Exception) { }
+            updated = true
+        }
+        while (true) {
+            val e = Store.nextQueued(this) ?: break
+            cur = e.getString("id"); lastNote = ""
+            Store.update(this, cur, "state" to "working", "note" to "Starting")
+            val dir = File(getExternalFilesDir(null), "work/$cur").apply { deleteRecursively(); mkdirs() }
             try {
-                val dir = File(getExternalFilesDir(null), "work").apply { deleteRecursively(); mkdirs() }
-                val starts = if (find) findBest(link, length, dir) else times
-                if (starts.isNotEmpty()) {
-                    say("Getting captions")
-                    val subs = if (caps) fetchSubs(link, dir) else null
-                    starts.forEachIndexed { i, s ->
-                        say("Clip ${i + 1} of ${starts.size}: working")
-                        try { val (f, caps) = render(link, i, s, length, dir, subs); addRow(f, i + 1, s, caps) }
-                        catch (e: Exception) { say("Clip ${i + 1} failed: ${e.message?.takeLast(150)}"); Thread.sleep(2500) }
+                val link = e.getString("link"); val len = e.getInt("length")
+                if (e.getString("kind") == "auto") {
+                    val starts = findBest(link, len, dir)
+                    if (starts.isEmpty()) Store.update(this, cur, "state" to "failed", "note" to lastNote.ifEmpty { "Nothing found" })
+                    else {
+                        val base = cur; cur = ""
+                        Store.remove(this, base)
+                        starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("kind", "clip").put("link", link)
+                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("state", "queued").put("note", "").put("path", "")) }
                     }
-                    say("Done. Tap a clip below to download it.")
+                } else {
+                    val s = e.getInt("start")
+                    val subs = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
+                    val (f, caps) = render(link, 0, s, len, dir, subs)
+                    val out = File(getExternalFilesDir("clips"), "$cur.mp4")
+                    f.copyTo(out, true)
+                    Store.update(this, cur, "state" to "done", "path" to out.absolutePath, "note" to if (caps) "with captions" else "no captions")
                 }
-            } catch (e: Exception) { say("Failed: ${e.message?.takeLast(200)}") } finally { busy(false) }
-        }.start()
+            } catch (ex: Exception) {
+                Store.update(this, cur, "state" to "failed", "note" to (ex.message ?: "error").takeLast(150))
+            } finally { dir.deleteRecursively() }
+        }
     }
 
     // ---- AI part: finds the most hyped moments ----
@@ -195,8 +357,8 @@ class MainActivity : Activity() {
             if (dur > 10800) { say("No 'most replayed' data and the video is over 3 hours. Type moments yourself."); return emptyList() }
             say("Listening to the audio (this can take a few minutes)")
             val a = YoutubeDLRequest(link)
-            a.addOption("-f", "ba[ext=m4a]/ba"); a.addOption("-o", "${dir.absolutePath}/audio.%(ext)s")
-            YoutubeDL.getInstance().execute(a)
+            a.addOption("-f", "worstaudio[ext=m4a]/worstaudio"); a.addOption("-o", "${dir.absolutePath}/audio.%(ext)s")
+            YoutubeDL.getInstance().execute(a) { p, _, _ -> say("Downloading audio to analyze: ${p.toInt().coerceAtLeast(0)}%") }
             val f = dir.listFiles { x -> x.name.startsWith("audio.") }?.firstOrNull() ?: throw RuntimeException("audio download failed")
             val loud = loudness(f)
             for (i in loud.indices) if (i < score.size) score[i] = loud[i]
@@ -234,7 +396,7 @@ class MainActivity : Activity() {
             val o = codec.dequeueOutputBuffer(info, 10000)
             if (o >= 0) {
                 val sb = codec.getOutputBuffer(o)!!.order(ByteOrder.nativeOrder()).asShortBuffer()
-                while (sb.hasRemaining()) { val v = sb.get().toDouble(); acc += v * v; n++; if (n == perSec) { sums.add(sqrt(acc / n)); acc = 0.0; n = 0 } }
+                while (sb.hasRemaining()) { val v = sb.get().toDouble(); acc += v * v; n++; if (n == perSec) { sums.add(sqrt(acc / n)); if (sums.size % 120 == 0) say("Analyzing audio: ${sums.size / 60} min done"); acc = 0.0; n = 0 } }
                 codec.releaseOutputBuffer(o, false)
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outDone = true
             }
@@ -278,46 +440,24 @@ class MainActivity : Activity() {
     // ---- cut + vertical crop + burn captions (falls back to no captions if this phone's FFmpeg can't) ----
     private fun render(link: String, i: Int, s: Int, length: Int, dir: File, subs: JSONObject?): Pair<File, Boolean> {
         val assF = File(dir, "c$i.ass")
-        val tries = if (subs != null && writeAss(subs, s, length, assF)) listOf(true, false) else listOf(false)
+        val tries = if (subs != null && writeAss(subs, s, length, assF)) listOf(Pair(true, true), Pair(false, true), Pair(false, false)) else listOf(Pair(false, true), Pair(false, false))
         var last: Exception? = null
-        for (caps in tries) {
+        for ((caps, fast) in tries) {
             try {
-                val vf = "crop=ih*9/16:ih,scale=1080:1920" + if (caps) ",ass=${assF.absolutePath}" else ""
+                val vf = "crop=ih*9/16:ih,scale=720:1280" + if (caps) ",ass=${assF.absolutePath}" else ""
                 val req = YoutubeDLRequest(link)
-                req.addOption("-f", "bv*[height<=1080]+ba/b")
+                req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
                 req.addOption("--merge-output-format", "mkv")
                 req.addOption("--download-sections", "*${fmt(s)}-${fmt(s + length)}")
-                req.addOption("--force-keyframes-at-cuts")
                 req.addOption("--recode-video", "mp4")
-                req.addOption("--postprocessor-args", "VideoConvertor:-vf $vf")
+                req.addOption("--postprocessor-args", "VideoConvertor:-vf $vf" + (if (fast) " -preset ultrafast -crf 28" else ""))
                 req.addOption("-o", "${dir.absolutePath}/clip$i.%(ext)s")
-                YoutubeDL.getInstance().execute(req) { p, _, _ -> say("Clip ${i + 1}: ${p.toInt().coerceAtLeast(0)}%") }
+                YoutubeDL.getInstance().execute(req) { p, _, _ -> say("Downloading and cutting the clip... ${p.toInt().coerceAtLeast(0)}%") }
                 val f = File(dir, "clip$i.mp4")
                 if (!f.exists() || f.length() == 0L) throw RuntimeException("empty file")
                 return Pair(f, caps)
             } catch (e: Exception) { last = e; File(dir, "clip$i.mp4").delete() }
         }
         throw last ?: RuntimeException("failed")
-    }
-
-    private fun addRow(f: File, n: Int, s: Int, caps: Boolean) = runOnUiThread {
-        list.addView(Button(this).apply {
-            isAllCaps = false; setTextColor(Color.WHITE)
-            background = GradientDrawable().apply { setColor(0xFF1B2A55.toInt()); cornerRadius = 40f }
-            text = "Download clip $n  (${fmt(s)}${if (caps) ", captions" else ", no captions"})"
-            setOnClickListener {
-                save(f, "Clip_${System.currentTimeMillis()}_$n.mp4")
-                Toast.makeText(this@MainActivity, "Saved to Movies/Clipper", Toast.LENGTH_LONG).show()
-            }
-        })
-    }
-
-    private fun save(f: File, name: String) {
-        val v = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Clipper")
-        }
-        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v)!!
-        contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
     }
 }
