@@ -96,6 +96,8 @@ class MainActivity : Activity() {
         val link = field("Paste a YouTube or Twitch link")
         var length = 30
         var camMode = ""
+        var lang = "en"
+        var blur = false
         val mBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val cap = Switch(this).apply { isChecked = true }
 
@@ -103,7 +105,7 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode) }
+            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
@@ -164,9 +166,22 @@ class MainActivity : Activity() {
         val cr2 = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         cr2.addView(tv("Webcam on top, gameplay below", 16f), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); cr2.addView(camSw)
         c3.addView(cr2, lp(16)); c3.addView(tv("Finds the webcam by itself. If it misses, pick its corner:", 13f, MUT), lp(8)); c3.addView(camRow, lp(8))
+        val langKeys = listOf("en", "in", "hi"); val langNames = listOf("English", "Indian English", "Hindi"); val langBtns = ArrayList<Button>()
+        fun paintLang() { langKeys.forEachIndexed { i, k -> langBtns[i].background = bg(if (k == lang) ACC else FIELD, 12) } }
+        val lrow2 = LinearLayout(this)
+        langKeys.forEachIndexed { i, k ->
+            val bt = btn(langNames[i], FIELD, WHITE) { lang = k; paintLang() }; bt.textSize = 13f; langBtns.add(bt)
+            lrow2.addView(bt, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(6) })
+        }
+        paintLang()
+        c3.addView(tv("Caption language (speech is recognised on your phone)", 13f, MUT), lp(16)); c3.addView(lrow2, lp(8))
+        val blurSw = Switch(this).apply { setOnCheckedChangeListener { _, on -> blur = on } }
+        val br = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        br.addView(tv("Blurred background (when no webcam)", 16f), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); br.addView(blurSw)
+        c3.addView(br, lp(16))
         col.addView(c3, lp(14))
 
-        col.addView(tv("Only clip streams you own or have permission to use.", 12f, MUT), lp(18))
+        col.addView(tv("Only clip streams you own or have permission to use.\nBuilt with yt-dlp, FFmpeg and Vosk (open source).", 12f, MUT), lp(18))
         formView = ScrollView(this).apply { setBackgroundColor(BG); isFillViewport = true; addView(col) }
         setContentView(formView)
         addM()
@@ -176,11 +191,11 @@ class MainActivity : Activity() {
     }
 
     private fun say(t: String) = runOnUiThread { status.text = t }
-    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String) {
+    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean) {
         if (!Regex("(youtube\\.com|youtu\\.be|twitch\\.tv)/").containsMatchIn(link)) { say("Paste a YouTube or Twitch link first."); return }
         val now = System.currentTimeMillis()
         fun entry(kind: String, start: Int, n: Int) = JSONObject().put("id", "$now-$n").put("kind", kind).put("link", link)
-            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("state", "queued").put("note", "").put("path", "")
+            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("state", "queued").put("note", "").put("path", "")
         if (find) Store.add(this, entry("auto", 0, 0)) else times.forEachIndexed { i, t -> Store.add(this, entry("clip", t, i)) }
         startForegroundService(Intent(this, ClipService::class.java))
         showClips()
@@ -238,9 +253,29 @@ class MainActivity : Activity() {
                     bt.setOnClickListener { Store.update(this, id, "state" to "queued"); startForegroundService(Intent(this, ClipService::class.java)) } }
                 else -> { wait++; bt.text = "Waiting: $title" }
             }
-            clipsBox.addView(bt, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = (8 * dens).toInt() })
+            val lpb = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = (8 * dens).toInt() }
+            if (st == "done") {
+                val row = LinearLayout(this)
+                row.addView(bt, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                row.addView(Button(this).apply {
+                    text = "Play"; isAllCaps = false; setTextColor(Color.WHITE)
+                    background = GradientDrawable().apply { setColor(0xFF1B2A55.toInt()); cornerRadius = 16 * dens }
+                    setOnClickListener { play(o.getString("path")) }
+                }, LinearLayout.LayoutParams(WRAP_CONTENT, MATCH_PARENT).apply { leftMargin = (8 * dens).toInt() })
+                clipsBox.addView(row, lpb)
+            } else clipsBox.addView(bt, lpb)
         }
         clipsSummary.text = "$done ready  |  $work in progress  |  $wait waiting\nClips keep being made even if you close the app."
+    }
+
+    private fun play(path: String) {
+        val vv = VideoView(this); vv.setVideoPath(path)
+        vv.setMediaController(MediaController(this).also { it.setAnchorView(vv) })
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        d.setContentView(FrameLayout(this).apply { addView(vv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER)) })
+        d.setOnDismissListener { vv.stopPlayback() }
+        vv.setOnPreparedListener { it.isLooping = true; vv.start() }
+        d.show()
     }
 
     private fun save(f: File, name: String) {
@@ -339,19 +374,19 @@ class ClipService : Service() {
                 val link = e.getString("link"); val len = e.getInt("length")
                 if (e.getString("kind") == "auto") {
                     val subs0 = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
-                    val starts = snap(findBest(link, len, dir), subs0)
+                    val starts = snap(findBest(link, len, dir, subs0), subs0)
                     if (starts.isEmpty()) Store.update(this, cur, "state" to "failed", "note" to lastNote.ifEmpty { "Nothing found" })
                     else {
                         val base = cur; cur = ""
                         Store.remove(this, base)
                         starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("kind", "clip").put("link", link)
-                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("state", "queued").put("note", "").put("path", "")) }
+                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("state", "queued").put("note", "").put("path", "")) }
                     }
                 } else {
                     val s = e.getInt("start")
                     val subs = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
                     val want = e.getBoolean("caps"); capWhy = ""
-                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want) }
+                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur")) }
                         catch (ex: Exception) { say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
                     val out = File(getExternalFilesDir("clips"), "$cur.mp4")
                     f.copyTo(out, true)
@@ -439,20 +474,61 @@ class ClipService : Service() {
     }
 
     // word-by-word caption pictures (3 words per line, current word in a yellow box), played back as an image list
-    private fun makeCaps(subs: JSONObject, s: Int, len: Int, dir: File): File? {
-        val evs = subs.optJSONArray("events") ?: return null
-        class Wd(val a: Double, var b: Double, val t: String)
-        val ws = ArrayList<Wd>()
+    private fun ytWords(subs: JSONObject, s: Int, len: Int): List<CapWord> {
+        val evs = subs.optJSONArray("events") ?: return emptyList()
+        val ws = ArrayList<CapWord>()
         for (i in 0 until evs.length()) {
             val e = evs.getJSONObject(i); val segs = e.optJSONArray("segs") ?: continue; val st = e.optLong("tStartMs")
             for (j in 0 until segs.length()) {
                 val g = segs.getJSONObject(j); val w = g.optString("utf8").trim(); if (w.isEmpty()) continue
-                val a = (st + g.optLong("tOffsetMs")) / 1000.0 - s
-                if (a >= 0 && a < len) ws.add(Wd(a, 0.0, w.uppercase()))
+                ws.add(CapWord((st + g.optLong("tOffsetMs")) / 1000.0 - s, 0.0, w.uppercase()))
             }
         }
+        return ws
+    }
+
+    // offline speech recognition (Vosk): word times come from the real audio of the clip, so captions stay in sync
+    private var voskModel: org.vosk.Model? = null
+    private var voskName = ""
+    private fun voskWords(raw: File, pre: Int, length: Int, dir: File, lang: String): List<CapWord> {
+        val name = when (lang) { "hi" -> "vosk-model-small-hi-0.22"; "in" -> "vosk-model-small-en-in-0.4"; else -> "vosk-model-small-en-us-0.15" }
+        val root = File(getExternalFilesDir(null), "vosk"); val md = File(root, name)
+        if (!md.exists()) {
+            root.mkdirs(); val zip = File(root, "$name.zip")
+            val c = java.net.URL("https://alphacephei.com/vosk/models/$name.zip").openConnection() as java.net.HttpURLConnection
+            c.connectTimeout = 20000; c.readTimeout = 30000
+            val total = c.contentLength.toLong(); var got = 0L
+            c.inputStream.use { i -> zip.outputStream().use { o ->
+                val b = ByteArray(65536)
+                while (true) { val n = i.read(b); if (n < 0) break; o.write(b, 0, n); got += n; if (total > 0) say("Downloading the speech model (one time): ${got * 100 / total}%") } } }
+            java.util.zip.ZipInputStream(zip.inputStream()).use { z ->
+                while (true) {
+                    val en = z.nextEntry ?: break; val f = File(root, en.name)
+                    if (!f.canonicalPath.startsWith(root.canonicalPath)) continue
+                    if (en.isDirectory) f.mkdirs() else { f.parentFile?.mkdirs(); f.outputStream().use { z.copyTo(it) } }
+                }
+            }
+            zip.delete()
+        }
+        if (voskName != name) { voskModel = org.vosk.Model(md.absolutePath); voskName = name }
+        say("Listening to the speech...")
+        val pcm = File(dir, "a.pcm")
+        if (!runFfmpeg(listOf("-y", "-ss", "$pre", "-i", raw.absolutePath, "-t", "$length", "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", pcm.absolutePath)))
+            throw RuntimeException("audio extract failed")
+        val rec = org.vosk.Recognizer(voskModel, 16000f); rec.setWords(true)
+        val out = ArrayList<CapWord>()
+        fun grab(js: String) {
+            val a = JSONObject(js).optJSONArray("result") ?: return
+            for (i in 0 until a.length()) { val o = a.getJSONObject(i); out.add(CapWord(o.getDouble("start"), o.getDouble("end"), o.getString("word").uppercase())) }
+        }
+        pcm.inputStream().use { ins -> val b = ByteArray(8000); while (true) { val n = ins.read(b); if (n < 0) break; if (rec.acceptWaveForm(b, n)) grab(rec.result) } }
+        grab(rec.finalResult); rec.close()
+        return out
+    }
+
+    private fun makeCaps(words: List<CapWord>, len: Int, dir: File): File? {
+        val ws = words.filter { it.a >= 0 && it.a < len }.sortedBy { it.a }
         if (ws.isEmpty()) return null
-        ws.sortBy { it.a }
         for (i in ws.indices) ws[i].b = if (i + 1 < ws.size) minOf(ws[i + 1].a, ws[i].a + 1.2) else ws[i].a + 0.8
         val W = 720; val H = 170
         val blank = File(dir, "blank.png")
@@ -477,17 +553,40 @@ class ClipService : Service() {
         return File(dir, "caps.txt").also { it.writeText(sb.toString()) }
     }
 
-    // main pipeline: download with a lead-in, then our own FFmpeg run (accurate cut, webcam layout, captions)
-    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean): Pair<File, Boolean> {
+    // Gets the exact piece of video+audio. Preferred: our own FFmpeg seeks both streams to the same second (keeps sound in sync).
+    // Fallback: yt-dlp section download with forced cuts. Returns how many seconds of lead-in the file has.
+    private fun fetchRaw(link: String, s: Int, length: Int, dir: File): Int {
+        val fmtSel = "bv*[height<=720]+ba/b[height<=720]/b"
+        try {
+            say("Getting the video address...")
+            val g = yt(link); g.addOption("-g"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel)
+            val urls = YoutubeDL.getInstance().execute(g).out.lines().map { it.trim() }.filter { it.startsWith("http") }
+            if (urls.isEmpty()) throw RuntimeException("no address")
+            say("Cutting the clip...")
+            val raw = File(dir, "raw.mp4")
+            val maps = if (urls.size > 1) listOf("-map", "0:v:0", "-map", "1:a:0") else listOf("-map", "0:v:0", "-map", "0:a:0?")
+            val ok = runFfmpeg(listOf("-y") + urls.flatMap { listOf("-ss", s.toString(), "-i", it) } + listOf("-t", "$length") + maps +
+                listOf("-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", raw.absolutePath))
+            if (ok && raw.length() > 10000) return 0
+            raw.delete()
+        } catch (e: Exception) { File(dir, "raw.mp4").delete() }
         val pre = minOf(20, s)
-        say("Downloading the clip...")
+        say("Downloading the clip (slower method)...")
         val req = yt(link)
-        req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b"); req.addOption("--merge-output-format", "mkv")
-        req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}"); req.addOption("-o", "${dir.absolutePath}/raw.%(ext)s")
+        req.addOption("-f", fmtSel); req.addOption("--merge-output-format", "mkv")
+        req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}"); req.addOption("--force-keyframes-at-cuts")
+        req.addOption("-o", "${dir.absolutePath}/raw.%(ext)s")
         YoutubeDL.getInstance().execute(req) { p, _, _ -> say("Downloading the clip... ${p.toInt().coerceAtLeast(0)}%") }
+        return pre
+    }
+
+    // main pipeline: download with a lead-in, then our own FFmpeg run (accurate cut, webcam layout, captions)
+    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean, lang: String, blur: Boolean): Pair<File, Boolean> {
+        val pre = fetchRaw(link, s, length, dir)
         val raw = dir.listFiles { x -> x.name.startsWith("raw.") && !x.name.endsWith(".part") && !x.name.endsWith(".ytdl") }?.firstOrNull()
             ?: throw RuntimeException("download failed")
         var layout = "crop=ih*9/16:ih,scale=720:1280"; var capY = 820
+        if (cam.isEmpty() && blur) layout = "split[a][b];[a]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:2[bg];[b]scale=720:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2"
         if (cam.isNotEmpty()) {
             say("Finding the webcam...")
             try {
@@ -496,11 +595,12 @@ class ClipService : Service() {
             } catch (e: Exception) { capWhy += " (webcam not found, pick its corner)" }
         }
         var capList: File? = null
-        if (want && subs == null) capWhy += " (this video has no English captions)"
-        if (subs != null) {
-            say("Drawing captions...")
-            capList = try { makeCaps(subs, s, length, dir) } catch (e: Exception) { null }
-            if (capList == null) capWhy += " (no speech found in this part)"
+        if (want) {
+            var words: List<CapWord>? = try { voskWords(raw, pre, length, dir, lang) }
+                catch (e: Exception) { capWhy += " (speech model problem: ${(e.message ?: "").takeLast(60)})"; null }
+            if (words.isNullOrEmpty() && subs != null) words = ytWords(subs, s, length)
+            if (!words.isNullOrEmpty()) { say("Drawing captions..."); capList = try { makeCaps(words, length, dir) } catch (e: Exception) { null } }
+            if (capList == null) capWhy += " (no speech found)"
         }
         say("Rendering the clip...")
         val fc = "[0:v]trim=start=$pre,setpts=PTS-STARTPTS,$layout[base];" +
@@ -517,7 +617,7 @@ class ClipService : Service() {
         return Pair(out, capList != null)
     }
 
-    private fun findBest(link: String, length: Int, dir: File): List<Int> {
+    private fun findBest(link: String, length: Int, dir: File, subs: JSONObject?): List<Int> {
         say("Scanning the video for hyped moments")
         val r = yt(link)
         r.addOption("--dump-single-json"); r.addOption("--no-playlist"); r.addOption("--skip-download")
@@ -540,6 +640,19 @@ class ClipService : Service() {
             val f = dir.listFiles { x -> x.name.startsWith("audio.") }?.firstOrNull() ?: throw RuntimeException("audio download failed")
             val loud = loudness(f)
             for (i in loud.indices) if (i < score.size) score[i] = loud[i]
+        }
+        val mx = score.maxOrNull() ?: 0.0
+        if (mx > 0) for (i in score.indices) score[i] /= mx
+        val evs = subs?.optJSONArray("events")
+        if (evs != null) {   // excited words in the captions make that second hotter
+            val hype = setOf("omg", "bro", "bruh", "insane", "crazy", "wtf", "wow", "holy", "yo", "no", "nah", "dude", "damn", "god", "what", "clutch", "lets", "let's", "goat", "dead", "cooked", "huh")
+            for (i in 0 until evs.length()) {
+                val o = evs.getJSONObject(i); val sg = o.optJSONArray("segs") ?: continue
+                var c = 0
+                for (j in 0 until sg.length()) if (sg.getJSONObject(j).optString("utf8").trim().lowercase().trim('.', ',', '!', '?') in hype) c++
+                val sec = (o.optLong("tStartMs") / 1000).toInt()
+                if (c > 0 && sec in score.indices) score[sec] += 0.35 * c
+            }
         }
         return pick(score, length, 5)
     }
@@ -628,7 +741,7 @@ class ClipService : Service() {
                 val req = yt(link)
                 req.addOption("-f", "bv*[height<=720]+ba/b[height<=720]/b")
                 req.addOption("--merge-output-format", "mkv")
-                req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}")
+                req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}"); req.addOption("--force-keyframes-at-cuts")
                 req.addOption("--recode-video", "mp4")
                 req.addOption("--postprocessor-args", "VideoConvertor:-vf $vf -af atrim=start=$pre,asetpts=PTS-STARTPTS" + (if (fast) " -preset ultrafast -crf 28" else ""))
                 req.addOption("-o", "${dir.absolutePath}/clip$i.%(ext)s")
@@ -641,3 +754,5 @@ class ClipService : Service() {
         throw last ?: RuntimeException("failed")
     }
 }
+
+class CapWord(val a: Double, var b: Double, val t: String)
