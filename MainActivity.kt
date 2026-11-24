@@ -18,6 +18,8 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PointF
@@ -55,7 +57,7 @@ class MainActivity : Activity() {
     private var inClips = false
     private var lastSig = ""
     private val h = Handler(Looper.getMainLooper())
-    private val tick = object : Runnable { override fun run() { if (inClips) { renderClips(); h.postDelayed(this, 1500) } } }
+    private val tick = object : Runnable { override fun run() { if (inClips) { renderClips(); h.postDelayed(this, 1000) } } }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -95,6 +97,7 @@ class MainActivity : Activity() {
         // sections
         val link = field("Paste a YouTube or Twitch link")
         var length = 30
+        var count = 3
         var camMode = ""
         var lang = "en"
         var blur = false
@@ -105,7 +108,7 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur) }
+            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
@@ -148,6 +151,14 @@ class MainActivity : Activity() {
             lrow.addView(bt, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(6) })
         }
         paint(); c2.addView(lrow, lp(8))
+        c2.addView(tv("Number of viral clips (when Create finds the moments)", 16f, WHITE, true), lp(16))
+        val cntBtns = ArrayList<Button>(); val crow = LinearLayout(this)
+        fun paintCnt() { cntBtns.forEachIndexed { i, b -> b.background = bg(if (i + 1 == count) ACC else FIELD, 14) } }
+        for (v in 1..5) {
+            val bt = btn("$v", FIELD, WHITE) { count = v; paintCnt() }; cntBtns.add(bt)
+            crow.addView(bt, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(6) })
+        }
+        paintCnt(); c2.addView(crow, lp(8))
         col.addView(c2, lp(14))
 
         val c3 = card("3 · CAPTIONS AND LAYOUT")
@@ -191,36 +202,52 @@ class MainActivity : Activity() {
     }
 
     private fun say(t: String) = runOnUiThread { status.text = t }
-    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean) {
+    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean, count: Int) {
         if (!Regex("(youtube\\.com|youtu\\.be|twitch\\.tv)/").containsMatchIn(link)) { say("Paste a YouTube or Twitch link first."); return }
         val now = System.currentTimeMillis()
         fun entry(kind: String, start: Int, n: Int) = JSONObject().put("id", "$now-$n").put("kind", kind).put("link", link)
-            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("state", "queued").put("note", "").put("path", "")
+            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("count", count).put("n", n + 1).put("batch", "$now").put("t0", now).put("title", "").put("state", "queued").put("note", "").put("path", "")
         if (find) Store.add(this, entry("auto", 0, 0)) else times.forEachIndexed { i, t -> Store.add(this, entry("clip", t, i)) }
         startForegroundService(Intent(this, ClipService::class.java))
         showClips()
     }
 
+    private val cBG = 0xFF0A1128.toInt(); private val cCARD = 0xFF121C3D.toInt(); private val cFIELD = 0xFF1B2A55.toInt()
+    private val cACC = 0xFF4C8DFF.toInt(); private val cMUT = 0xFF8FA3C7.toInt(); private val cOK = 0xFF3DDC97.toInt()
+    private var tab = 0
+    private lateinit var tabBtns: List<Button>
+    private fun d2p(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun rr(c: Int, r: Int = 16) = GradientDrawable().apply { setColor(c); cornerRadius = d2p(r).toFloat() }
+    private fun txt(t: String, size: Float, c: Int = Color.WHITE, bold: Boolean = false) = TextView(this).apply {
+        text = t; textSize = size; setTextColor(c); if (bold) setTypeface(typeface, Typeface.BOLD) }
+    private fun lpm(top: Int = 0) = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = d2p(top) }
+    private fun card() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rr(cCARD, 22); setPadding(d2p(16), d2p(16), d2p(16), d2p(16)) }
+    private fun title(o: JSONObject) = o.optString("title").ifEmpty { o.optString("link") }
+    private fun hasActive(): Boolean {
+        val a = Store.all(this)
+        for (i in 0 until a.length()) { val st = a.getJSONObject(i).getString("state"); if (st == "queued" || st == "working") return true }
+        return false
+    }
+    private fun paintTabs() { tabBtns.forEachIndexed { i, b -> b.background = rr(if (i == tab) cACC else cCARD, 14) } }
+
     private fun showClips() {
-        val dens = resources.displayMetrics.density
-        fun dp(v: Int) = (v * dens).toInt()
         if (!::clipsView.isInitialized) {
             clipsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            clipsSummary = TextView(this).apply { textSize = 15f; setTextColor(0xFF8FA3C7.toInt()); setPadding(0, dp(8), 0, dp(12)) }
-            val back = Button(this).apply {
-                text = "Back"; isAllCaps = false; setTextColor(Color.WHITE)
-                background = GradientDrawable().apply { setColor(0xFF121C3D.toInt()); cornerRadius = dp(16).toFloat() }
-                setOnClickListener { hideClips() }
-            }
+            clipsSummary = txt("Clips are made in the background, even if you close the app.", 13f, cMUT)
+            tabBtns = listOf("Generation", "Clips").mapIndexed { i, n ->
+                Button(this).apply { text = n; isAllCaps = false; setTextColor(Color.WHITE); setOnClickListener { tab = i; lastSig = ""; paintTabs(); renderClips() } } }
+            val tabs = LinearLayout(this)
+            tabBtns.forEach { tabs.addView(it, LinearLayout.LayoutParams(0, d2p(48), 1f).apply { rightMargin = d2p(6) }) }
+            val back = Button(this).apply { text = "Back"; isAllCaps = false; setTextColor(Color.WHITE); background = rr(cCARD, 16); setOnClickListener { hideClips() } }
             val col = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(36), dp(16), dp(24))
-                addView(TextView(this@MainActivity).apply { text = "My clips"; textSize = 32f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD) })
-                addView(clipsSummary); addView(clipsBox); addView(back)
+                orientation = LinearLayout.VERTICAL; setPadding(d2p(16), d2p(36), d2p(16), d2p(24))
+                addView(txt("My clips", 32f, Color.WHITE, true)); addView(clipsSummary, lpm(4)); addView(tabs, lpm(14)); addView(clipsBox); addView(back, lpm(18))
             }
-            clipsView = ScrollView(this).apply { setBackgroundColor(0xFF0A1128.toInt()); addView(col) }
+            clipsView = ScrollView(this).apply { setBackgroundColor(cBG); addView(col) }
         }
+        tab = if (hasActive()) 0 else 1; paintTabs()
         inClips = true; lastSig = ""
-        setContentView(clipsView)
+        setContentView(clipsView); renderClips()
         h.removeCallbacks(tick); h.post(tick)
     }
 
@@ -229,43 +256,134 @@ class MainActivity : Activity() {
     override fun onPause() { super.onPause(); h.removeCallbacks(tick) }
     override fun onResume() { super.onResume(); if (inClips) { lastSig = ""; h.post(tick) } }
 
-    private fun renderClips() {
-        val a = Store.all(this)
-        if (a.toString() == lastSig) return
-        lastSig = a.toString()
-        val dens = resources.displayMetrics.density
-        var done = 0; var work = 0; var wait = 0
-        clipsBox.removeAllViews()
-        for (i in a.length() - 1 downTo 0) {
-            val o = a.getJSONObject(i); val st = o.getString("state"); val id = o.getString("id")
-            val title = if (o.getString("kind") == "auto") "Finding best moments" else "Clip at ${fmt(o.getInt("start"))}, ${o.getInt("length")} sec"
-            val bt = Button(this).apply {
-                isAllCaps = false; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                background = GradientDrawable().apply { setColor(if (st == "done") 0xFF4C8DFF.toInt() else 0xFF1B2A55.toInt()); cornerRadius = 16 * dens }
-            }
-            when (st) {
-                "done" -> { done++; bt.text = "Download: $title" + (if (o.optString("note").isNotEmpty()) "\n${o.getString("note")}" else "")
-                    bt.setOnClickListener {
-                        try { save(File(o.getString("path")), "Clip_${id}.mp4"); Toast.makeText(this, "Saved to Movies/Clipper", Toast.LENGTH_LONG).show() }
-                        catch (e: Exception) { Toast.makeText(this, "Could not save: ${e.message}", Toast.LENGTH_LONG).show() } } }
-                "working" -> { work++; bt.text = "In progress: $title\n${o.optString("note")}" }
-                "failed" -> { bt.text = "Failed: $title\n${o.optString("note")}\nTap to retry"
-                    bt.setOnClickListener { Store.update(this, id, "state" to "queued"); startForegroundService(Intent(this, ClipService::class.java)) } }
-                else -> { wait++; bt.text = "Waiting: $title" }
-            }
-            val lpb = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = (8 * dens).toInt() }
-            if (st == "done") {
-                val row = LinearLayout(this)
-                row.addView(bt, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                row.addView(Button(this).apply {
-                    text = "Play"; isAllCaps = false; setTextColor(Color.WHITE)
-                    background = GradientDrawable().apply { setColor(0xFF1B2A55.toInt()); cornerRadius = 16 * dens }
-                    setOnClickListener { play(o.getString("path")) }
-                }, LinearLayout.LayoutParams(WRAP_CONTENT, MATCH_PARENT).apply { leftMargin = (8 * dens).toInt() })
-                clipsBox.addView(row, lpb)
-            } else clipsBox.addView(bt, lpb)
+    private fun renderClips() { if (tab == 0) renderGen() else renderDone() }
+
+    // live view of what the background service is doing
+    private fun renderGen() {
+        val a = Store.all(this); val now = System.currentTimeMillis()
+        var batch = ""
+        for (pass in listOf("working", "queued")) {
+            if (batch.isNotEmpty()) break
+            for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == pass) { batch = o.optString("batch"); break } }
         }
-        clipsSummary.text = "$done ready  |  $work in progress  |  $wait waiting\nClips keep being made even if you close the app."
+        clipsBox.removeAllViews()
+        if (batch.isNotEmpty()) {
+            var total = 0; var done = 0; var curE: JSONObject? = null; var t0 = now
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i); if (o.optString("batch") != batch) continue
+                t0 = minOf(t0, o.optLong("t0", now))
+                total += if (o.getString("kind") == "auto") o.optInt("count", 3) else 1
+                if (o.getString("state") == "done") done++
+                if (o.getString("state") == "working") curE = o
+            }
+            val ce = curE
+            val st = ce?.optInt("stage", 0) ?: 0
+            val frac = if (ce == null) 0.0 else if (ce.getString("kind") == "auto") 0.05 else listOf(0.15, 0.55, 0.85)[st.coerceIn(0, 2)]
+            val pct = (((done + frac) / maxOf(total, 1)) * 100).toInt().coerceIn(0, 99)
+            val el = (now - t0) / 1000
+            val note = ce?.optString("note") ?: "Waiting in line..."
+            val c = card(); c.gravity = Gravity.CENTER_HORIZONTAL
+            c.addView(TextView(this).apply {
+                text = "${el}s"; textSize = 26f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF4C6FFF.toInt()) } }, LinearLayout.LayoutParams(d2p(110), d2p(110)))
+            c.addView(txt("Creating Viral Clips", 22f, Color.WHITE, true), lpm(14))
+            c.addView(txt("Processing 100% on your phone", 14f, cMUT), lpm(4))
+            c.addView(txt("Elapsed: ${el}s  -  ${note.take(36)}", 13f, cACC, true).apply { background = rr(cFIELD, 20); setPadding(d2p(16), d2p(8), d2p(16), d2p(8)) }, lpm(12))
+            val pr = LinearLayout(this)
+            pr.addView(txt("Processing Progress", 14f, cMUT), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); pr.addView(txt("$pct%", 14f, cACC, true))
+            c.addView(pr, lpm(16))
+            c.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = pct; progressTintList = ColorStateList.valueOf(cACC) }, lpm(6))
+            c.addView(txt("Clip ${minOf(done + 1, total)} of $total: $note", 14f, cACC, true), lpm(10))
+            clipsBox.addView(c, lpm(8))
+            val sc = card(); sc.addView(txt("Pipeline Stages", 16f, Color.WHITE, true))
+            val names = listOf("Import Video" to "Media stream and viral moments", "Transcribe Audio" to "Speech recognised on your phone", "Editing and Put Captions" to "9:16 layout and captions")
+            names.forEachIndexed { i, pair ->
+                val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                val mark = if (ce == null) "o" else if (i < st) "✓" else if (i == st) "..." else "o"
+                row.addView(txt(mark, 20f, if (ce != null && i < st) cOK else cACC, true), LinearLayout.LayoutParams(d2p(40), WRAP_CONTENT))
+                val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                mid.addView(txt(pair.first, 16f, if (ce != null && i == st) cACC else Color.WHITE, true)); mid.addView(txt(pair.second, 12f, cMUT))
+                row.addView(mid, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                if (ce != null && i <= st) {
+                    val a0 = ce.optLong("ts$i"); val a1 = if (i < st) ce.optLong("ts${i + 1}") else now
+                    row.addView(txt("${maxOf(0L, a1 - a0) / 1000}s" + (if (i < st) " ✓" else ""), 13f, if (i < st) cOK else cACC, true)
+                        .apply { background = rr(cFIELD, 14); setPadding(d2p(12), d2p(6), d2p(12), d2p(6)) })
+                }
+                sc.addView(row, lpm(14))
+            }
+            clipsBox.addView(sc, lpm(12))
+        } else clipsBox.addView(txt("Nothing is being generated right now.", 15f, cMUT), lpm(16))
+        for (i in 0 until a.length()) {
+            val o = a.getJSONObject(i); if (o.getString("state") != "failed") continue
+            val b = Button(this).apply {
+                isAllCaps = false; setTextColor(Color.WHITE); gravity = Gravity.START or Gravity.CENTER_VERTICAL; background = rr(cFIELD, 16)
+                text = "Failed: ${title(o)}\n${o.optString("note")}\nTap to retry"
+                setOnClickListener { Store.update(this@MainActivity, o.getString("id"), "state" to "queued"); startForegroundService(Intent(this@MainActivity, ClipService::class.java)) }
+            }
+            clipsBox.addView(b, lpm(10))
+        }
+    }
+
+    // finished clips, grouped by video
+    private fun renderDone() {
+        val a = Store.all(this)
+        val sig = StringBuilder()
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "done") sig.append(o.getString("id")).append(';') }
+        if (sig.toString() == lastSig) return
+        lastSig = sig.toString(); clipsBox.removeAllViews()
+        val groups = LinkedHashMap<String, ArrayList<JSONObject>>()
+        for (i in a.length() - 1 downTo 0) { val o = a.getJSONObject(i); if (o.getString("state") == "done") groups.getOrPut(o.optString("batch")) { ArrayList() }.add(o) }
+        if (groups.isEmpty()) { clipsBox.addView(txt("No clips yet. Tap Create to make some.", 15f, cMUT), lpm(16)); return }
+        val df = java.text.SimpleDateFormat("dd MMM, hh:mm a", java.util.Locale.getDefault())
+        for ((_, list) in groups) {
+            list.sortBy { it.optInt("n") }
+            val head = card()
+            head.addView(txt(title(list[0]), 18f, Color.WHITE, true).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END })
+            head.addView(txt("${list.size} clip(s) from this video", 14f, cACC, true), lpm(4))
+            clipsBox.addView(head, lpm(14))
+            for (o in list) clipsBox.addView(clipCard(o, df), lpm(10))
+        }
+    }
+
+    private fun uriFor(o: JSONObject): Uri {
+        val u = o.optString("uri"); if (u.isNotEmpty()) return Uri.parse(u)
+        val uri = save(File(o.getString("path")), "Clip_${o.getString("id")}.mp4")
+        Store.update(this, o.getString("id"), "uri" to uri.toString()); return uri
+    }
+
+    private fun clipCard(o: JSONObject, df: java.text.SimpleDateFormat): View {
+        val c = card(); val top = LinearLayout(this)
+        val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; background = rr(cFIELD, 12)
+            BitmapFactory.decodeFile(o.optString("thumb"))?.let { setImageBitmap(it) } }
+        top.addView(iv, LinearLayout.LayoutParams(d2p(84), d2p(110)))
+        val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(d2p(14), 0, 0, 0) }
+        val hd = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        hd.addView(txt("Clip ${o.optInt("n", 1)}", 20f, Color.WHITE, true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        hd.addView(txt("9:16 Shorts", 11f, cACC, true).apply { background = rr(cFIELD, 12); setPadding(d2p(10), d2p(4), d2p(10), d2p(4)) })
+        mid.addView(hd); mid.addView(txt("Duration: ${o.optInt("length")}s", 14f, cACC, true), lpm(6))
+        mid.addView(txt(df.format(java.util.Date(o.optLong("finished"))), 13f, cMUT), lpm(4))
+        top.addView(mid, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+        c.addView(top)
+        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(Button(this).apply { text = "▶ Play Clip"; isAllCaps = false; setTextColor(Color.WHITE); background = rr(cACC, 12)
+            setOnClickListener { play(o.getString("path")) } }, LinearLayout.LayoutParams(0, d2p(44), 1f))
+        fun ib(icon: Int, tint: Int, f: () -> Unit) = ImageButton(this).apply { setImageResource(icon); setColorFilter(tint); background = null; setOnClickListener { f() } }
+        row.addView(ib(android.R.drawable.stat_sys_download, Color.WHITE) {
+            try { uriFor(o); Toast.makeText(this, "Saved to Movies/Clipper", Toast.LENGTH_LONG).show() }
+            catch (e: Exception) { Toast.makeText(this, "Could not save: ${e.message}", Toast.LENGTH_LONG).show() }
+        }, LinearLayout.LayoutParams(d2p(52), d2p(48)).apply { leftMargin = d2p(6) })
+        row.addView(ib(android.R.drawable.ic_menu_share, Color.WHITE) {
+            try { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("video/mp4").putExtra(Intent.EXTRA_STREAM, uriFor(o)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "Share clip")) }
+            catch (e: Exception) { Toast.makeText(this, "Could not share: ${e.message}", Toast.LENGTH_LONG).show() }
+        }, LinearLayout.LayoutParams(d2p(52), d2p(48)))
+        row.addView(ib(android.R.drawable.ic_menu_delete, 0xFFFF5A5A.toInt()) {
+            AlertDialog.Builder(this).setTitle("Delete Clip ${o.optInt("n", 1)}?").setMessage(title(o))
+                .setPositiveButton("Delete") { _, _ ->
+                    File(o.optString("path")).delete(); File(o.optString("thumb")).delete(); Store.remove(this, o.getString("id")); lastSig = ""; renderClips() }
+                .setNegativeButton("Cancel", null).show()
+        }, LinearLayout.LayoutParams(d2p(52), d2p(48)))
+        c.addView(row, lpm(12))
+        return c
     }
 
     private fun play(path: String) {
@@ -278,13 +396,14 @@ class MainActivity : Activity() {
         d.show()
     }
 
-    private fun save(f: File, name: String) {
+    private fun save(f: File, name: String): Uri {
         val v = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name); put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Clipper")
         }
         val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v)!!
         contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
+        return uri
     }
 }
 
@@ -368,18 +487,18 @@ class ClipService : Service() {
         while (true) {
             val e = Store.nextQueued(this) ?: break
             cur = e.getString("id"); lastNote = ""
-            Store.update(this, cur, "state" to "working", "note" to "Starting")
+            Store.update(this, cur, "state" to "working", "note" to "Starting"); curStage = -1; stage(0)
             val dir = File(getExternalFilesDir(null), "work/$cur").apply { deleteRecursively(); mkdirs() }
             try {
                 val link = e.getString("link"); val len = e.getInt("length")
                 if (e.getString("kind") == "auto") {
                     val subs0 = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
-                    val starts = snap(findBest(link, len, dir, subs0), subs0)
+                    val starts = snap(findBest(link, len, dir, subs0, e.optInt("count", 3)), subs0)
                     if (starts.isEmpty()) Store.update(this, cur, "state" to "failed", "note" to lastNote.ifEmpty { "Nothing found" })
                     else {
                         val base = cur; cur = ""
                         Store.remove(this, base)
-                        starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("kind", "clip").put("link", link)
+                        starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("n", i + 1).put("batch", e.optString("batch")).put("t0", e.optLong("t0")).put("title", lastTitle).put("kind", "clip").put("link", link)
                             .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("state", "queued").put("note", "").put("path", "")) }
                     }
                 } else {
@@ -390,7 +509,8 @@ class ClipService : Service() {
                         catch (ex: Exception) { say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
                     val out = File(getExternalFilesDir("clips"), "$cur.mp4")
                     f.copyTo(out, true)
-                    Store.update(this, cur, "state" to "done", "path" to out.absolutePath, "note" to ((if (caps) "with captions" else "no captions") + capWhy))
+                    val th = File(getExternalFilesDir("clips"), "$cur.jpg"); thumb(f, th)
+                    Store.update(this, cur, "state" to "done", "path" to out.absolutePath, "thumb" to th.absolutePath, "finished" to System.currentTimeMillis(), "note" to ((if (caps) "with captions" else "no captions") + capWhy))
                 }
             } catch (ex: Exception) {
                 Store.update(this, cur, "state" to "failed", "note" to (ex.message ?: "error").takeLast(150))
@@ -401,6 +521,24 @@ class ClipService : Service() {
     // ---- AI part: finds the most hyped moments ----
     private var capWhy = ""
     private var lastErr = ""
+    private var lastTitle = ""
+    private var curStage = -1
+
+    private fun stage(k: Int) {
+        if (k <= curStage || cur.isEmpty()) return
+        val now = System.currentTimeMillis(); val kv = ArrayList<Pair<String, Any>>()
+        for (j in (curStage + 1)..k) kv.add("ts$j" to now)
+        kv.add("stage" to k); curStage = k
+        Store.update(this, cur, *kv.toTypedArray())
+    }
+
+    private fun thumb(f: File, out: File) {
+        try {
+            val r = MediaMetadataRetriever(); r.setDataSource(f.absolutePath)
+            val b = r.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return
+            out.outputStream().use { Bitmap.createScaledBitmap(b, 216, 384, true).compress(Bitmap.CompressFormat.JPEG, 80, it) }
+        } catch (e: Exception) { }
+    }
 
     private fun snap(starts: List<Int>, subs: JSONObject?): List<Int> {
         val ev = subs?.optJSONArray("events") ?: return starts
@@ -559,8 +697,10 @@ class ClipService : Service() {
         val fmtSel = "bv*[height<=720]+ba/b[height<=720]/b"
         try {
             say("Getting the video address...")
-            val g = yt(link); g.addOption("-g"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel)
-            val urls = YoutubeDL.getInstance().execute(g).out.lines().map { it.trim() }.filter { it.startsWith("http") }
+            val g = yt(link); g.addOption("-g"); g.addOption("-e"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel)
+            val lines = YoutubeDL.getInstance().execute(g).out.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val urls = lines.filter { it.startsWith("http") }
+            lines.firstOrNull { !it.startsWith("http") }?.let { t -> if (cur.isNotEmpty()) Store.update(this, cur, "title" to t) }
             if (urls.isEmpty()) throw RuntimeException("no address")
             say("Cutting the clip...")
             val raw = File(dir, "raw.mp4")
@@ -596,12 +736,15 @@ class ClipService : Service() {
         }
         var capList: File? = null
         if (want) {
+            stage(1)
             var words: List<CapWord>? = try { voskWords(raw, pre, length, dir, lang) }
                 catch (e: Exception) { capWhy += " (speech model problem: ${(e.message ?: "").takeLast(60)})"; null }
             if (words.isNullOrEmpty() && subs != null) words = ytWords(subs, s, length)
+            stage(2)
             if (!words.isNullOrEmpty()) { say("Drawing captions..."); capList = try { makeCaps(words, length, dir) } catch (e: Exception) { null } }
             if (capList == null) capWhy += " (no speech found)"
         }
+        stage(2)
         say("Rendering the clip...")
         val fc = "[0:v]trim=start=$pre,setpts=PTS-STARTPTS,$layout[base];" +
             (if (capList != null) "[1:v]format=rgba[cap];[base][cap]overlay=0:$capY:eof_action=pass,format=yuv420p[v];" else "[base]format=yuv420p[v];") +
@@ -617,12 +760,13 @@ class ClipService : Service() {
         return Pair(out, capList != null)
     }
 
-    private fun findBest(link: String, length: Int, dir: File, subs: JSONObject?): List<Int> {
+    private fun findBest(link: String, length: Int, dir: File, subs: JSONObject?, count: Int): List<Int> {
         say("Scanning the video for hyped moments")
         val r = yt(link)
         r.addOption("--dump-single-json"); r.addOption("--no-playlist"); r.addOption("--skip-download")
         val info = JSONObject(YoutubeDL.getInstance().execute(r).out)
         val dur = info.optDouble("duration", 0.0).toInt()
+        lastTitle = info.optString("title")
         if (dur < length * 2) { say("Can't scan this one (live right now, or too short). Try again after the stream ends."); return emptyList() }
         val score = DoubleArray(dur + 1)
         val hm = info.optJSONArray("heatmap")
@@ -654,7 +798,7 @@ class ClipService : Service() {
                 if (c > 0 && sec in score.indices) score[sec] += 0.35 * c
             }
         }
-        return pick(score, length, 5)
+        return pick(score, length, count)
     }
 
     private fun pick(score: DoubleArray, len: Int, k: Int): List<Int> {
