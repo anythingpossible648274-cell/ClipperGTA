@@ -96,6 +96,8 @@ class MainActivity : Activity() {
 
         // sections
         val link = field("Paste a YouTube or Twitch link")
+        val wmField = field("@yourname  (leave empty = no watermark)")
+        wmField.setText(getSharedPreferences("clipper", 0).getString("wm", ""))
         var length = 30
         var count = 3
         var camMode = ""
@@ -108,7 +110,7 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count) }
+            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count, wmField.text.toString().trim()) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
@@ -190,6 +192,9 @@ class MainActivity : Activity() {
         val br = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         br.addView(tv("Blurred background (when no webcam)", 16f), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); br.addView(blurSw)
         c3.addView(br, lp(16))
+        c3.addView(tv("Watermark (optional)", 16f, WHITE, true), lp(18))
+        c3.addView(tv("Shows at the bottom middle of every clip. Leave empty for none.", 13f, MUT), lp(4))
+        c3.addView(wmField, lp(8))
         col.addView(c3, lp(14))
 
         col.addView(tv("Only clip streams you own or have permission to use.\nBuilt with yt-dlp, FFmpeg and Vosk (open source).", 12f, MUT), lp(18))
@@ -202,11 +207,12 @@ class MainActivity : Activity() {
     }
 
     private fun say(t: String) = runOnUiThread { status.text = t }
-    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean, count: Int) {
+    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean, count: Int, wm: String) {
+        getSharedPreferences("clipper", 0).edit().putString("wm", wm).apply()
         if (!Regex("(youtube\\.com|youtu\\.be|twitch\\.tv)/").containsMatchIn(link)) { say("Paste a YouTube or Twitch link first."); return }
         val now = System.currentTimeMillis()
         fun entry(kind: String, start: Int, n: Int) = JSONObject().put("id", "$now-$n").put("kind", kind).put("link", link)
-            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("count", count).put("n", n + 1).put("batch", "$now").put("t0", now).put("title", "").put("state", "queued").put("note", "").put("path", "")
+            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("count", count).put("wm", wm).put("n", n + 1).put("batch", "$now").put("t0", now).put("title", "").put("state", "queued").put("note", "").put("path", "")
         if (find) Store.add(this, entry("auto", 0, 0)) else times.forEachIndexed { i, t -> Store.add(this, entry("clip", t, i)) }
         startForegroundService(Intent(this, ClipService::class.java))
         showClips()
@@ -499,13 +505,13 @@ class ClipService : Service() {
                         val base = cur; cur = ""
                         Store.remove(this, base)
                         starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("n", i + 1).put("batch", e.optString("batch")).put("t0", e.optLong("t0")).put("title", lastTitle).put("kind", "clip").put("link", link)
-                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("state", "queued").put("note", "").put("path", "")) }
+                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("wm", e.optString("wm")).put("state", "queued").put("note", "").put("path", "")) }
                     }
                 } else {
                     val s = e.getInt("start")
                     val subs = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
                     val want = e.getBoolean("caps"); capWhy = ""
-                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur")) }
+                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur"), e.optString("wm")) }
                         catch (ex: Exception) { say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
                     val out = File(getExternalFilesDir("clips"), "$cur.mp4")
                     f.copyTo(out, true)
@@ -522,6 +528,20 @@ class ClipService : Service() {
     private var capWhy = ""
     private var lastErr = ""
     private var lastTitle = ""
+
+    // watermark text: light yellow-white letters with a black shadow, no background box
+    private fun makeWm(text: String, dir: File): File {
+        val W = 720; val H = 90
+        val bm = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888); val c = Canvas(bm)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = 38f; textAlign = Paint.Align.CENTER }
+        var sz = 38f
+        while (p.measureText(text) > W - 40 && sz > 16f) { sz -= 2f; p.textSize = sz }
+        val y = H / 2f + p.textSize * 0.35f
+        p.style = Paint.Style.STROKE; p.strokeWidth = 7f; p.strokeJoin = Paint.Join.ROUND; p.color = 0xB3000000.toInt(); c.drawText(text, W / 2f, y, p)
+        p.style = Paint.Style.FILL; p.setShadowLayer(8f, 0f, 3f, Color.BLACK); p.color = 0xFFFFF4B0.toInt(); c.drawText(text, W / 2f, y, p)
+        val f = File(dir, "wm.png"); f.outputStream().use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return f
+    }
     private var curStage = -1
 
     private fun stage(k: Int) {
@@ -721,7 +741,7 @@ class ClipService : Service() {
     }
 
     // main pipeline: download with a lead-in, then our own FFmpeg run (accurate cut, webcam layout, captions)
-    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean, lang: String, blur: Boolean): Pair<File, Boolean> {
+    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean, lang: String, blur: Boolean, wm: String): Pair<File, Boolean> {
         val pre = fetchRaw(link, s, length, dir)
         val raw = dir.listFiles { x -> x.name.startsWith("raw.") && !x.name.endsWith(".part") && !x.name.endsWith(".ytdl") }?.firstOrNull()
             ?: throw RuntimeException("download failed")
@@ -746,10 +766,19 @@ class ClipService : Service() {
         }
         stage(2)
         say("Rendering the clip...")
-        val fc = "[0:v]trim=start=$pre,setpts=PTS-STARTPTS,$layout[base];" +
-            (if (capList != null) "[1:v]format=rgba[cap];[base][cap]overlay=0:$capY:eof_action=pass,format=yuv420p[v];" else "[base]format=yuv420p[v];") +
-            "[0:a]atrim=start=$pre,asetpts=PTS-STARTPTS[a]"
-        val inputs = listOf("-i", raw.absolutePath) + (if (capList != null) listOf("-f", "concat", "-safe", "0", "-i", capList.absolutePath) else listOf())
+        val wmFile = if (wm.isNotBlank()) try { makeWm(wm.trim().take(32), dir) } catch (e: Exception) { null } else null
+        val wmY = if (capY == 475) 1190 else 1095   // bottom middle (a little higher on the blurred layout)
+        val inputs = ArrayList<String>(listOf("-i", raw.absolutePath))
+        var fc = "[0:v]trim=start=$pre,setpts=PTS-STARTPTS,$layout[base];"; var last = "base"; var idx = 1
+        if (capList != null) {
+            inputs.addAll(listOf("-f", "concat", "-safe", "0", "-i", capList.absolutePath))
+            fc += "[$idx:v]format=rgba[cap];[$last][cap]overlay=0:$capY:eof_action=pass[c1];"; last = "c1"; idx++
+        }
+        if (wmFile != null) {
+            inputs.addAll(listOf("-loop", "1", "-i", wmFile.absolutePath))
+            fc += "[$idx:v]format=rgba[wm];[$last][wm]overlay=0:$wmY:shortest=1[c2];"; last = "c2"; idx++
+        }
+        fc += "[$last]format=yuv420p[v];[0:a]atrim=start=$pre,asetpts=PTS-STARTPTS[a]"
         val out = File(dir, "out.mp4"); var ok = false
         for (enc in listOf(listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "26"), listOf("-c:v", "mpeg4", "-q:v", "5"))) {
             ok = runFfmpeg(listOf("-y") + inputs + listOf("-filter_complex", fc, "-map", "[v]", "-map", "[a]", "-t", "$length") + enc +
