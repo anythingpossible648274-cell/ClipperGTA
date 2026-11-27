@@ -97,9 +97,14 @@ class MainActivity : Activity() {
         // sections
         val link = field("Paste a YouTube or Twitch link")
         val wmField = field("@yourname  (leave empty = no watermark)")
+        val prefs = getSharedPreferences("clipper", 0)
+        val keyField = field("Groq API key (starts with gsk_)").apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD; setText(prefs.getString("groq", "")) }
+        val brainSw = Switch(this).apply { isChecked = prefs.getBoolean("brain", true) }
         wmField.setText(getSharedPreferences("clipper", 0).getString("wm", ""))
         var length = 30
         var count = 3
+        var hq = 720
         var camMode = ""
         var lang = "en"
         var blur = false
@@ -110,7 +115,7 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count, wmField.text.toString().trim()) }
+            try { val t = times(); prefs.edit().putString("groq", keyField.text.toString().trim()).putBoolean("brain", brainSw.isChecked).apply(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count, wmField.text.toString().trim(), hq, brainSw.isChecked) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
@@ -122,6 +127,27 @@ class MainActivity : Activity() {
         status = tv("", 14f, MUT).apply { setPadding(0, dp(12), 0, dp(4)) }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(status); col.addView(list)
+
+        val cAI = card("AI VIRAL BRAIN (ONLINE, FREE KEY)")
+        val ar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        ar.addView(tv("Use the AI brain", 16f), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)); ar.addView(brainSw)
+        cAI.addView(ar, lp(12))
+        cAI.addView(tv("Exact word-by-word captions (Whisper) and smarter viral moment picking. Needs a free Groq key; the key stays on this phone.", 13f, MUT), lp(8))
+        cAI.addView(keyField, lp(10))
+        val brainStatus = tv(if (keyField.text.isNotBlank()) "Key saved on this phone." else "No key yet.", 13f, MUT)
+        cAI.addView(btn("Test and save key", FIELD, WHITE) {
+            val k = keyField.text.toString().trim(); prefs.edit().putString("groq", k).apply(); brainStatus.text = "Checking..."
+            Thread {
+                val ok = try {
+                    val cn = java.net.URL("https://api.groq.com/openai/v1/models").openConnection() as java.net.HttpURLConnection
+                    cn.setRequestProperty("Authorization", "Bearer $k"); cn.connectTimeout = 15000; cn.responseCode == 200
+                } catch (e: Exception) { false }
+                runOnUiThread { brainStatus.text = if (ok) "Connected. AI brain is ready." else "Key not accepted, or no internet." }
+            }.start()
+        }, lp(10))
+        cAI.addView(brainStatus, lp(8))
+        cAI.addView(btn("Get a free key: console.groq.com/keys", 0, ACC) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://console.groq.com/keys"))) }, lp(4))
+        col.addView(cAI, lp(10))
 
         val c1 = card("1 · STREAM LINK")
         val lr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -161,6 +187,14 @@ class MainActivity : Activity() {
             crow.addView(bt, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(6) })
         }
         paintCnt(); c2.addView(crow, lp(8))
+        c2.addView(tv("Video quality", 16f, WHITE, true), lp(16))
+        val hqBtns = ArrayList<Button>(); val hrow = LinearLayout(this); val hqs = listOf(480, 720, 1080)
+        fun paintHq() { hqBtns.forEachIndexed { i, b -> b.background = bg(if (hqs[i] == hq) ACC else FIELD, 14) } }
+        hqs.forEach { v ->
+            val bt = btn(if (v == 1080) "1080p Full HD" else "${v}p", FIELD, WHITE) { hq = v; paintHq() }; bt.textSize = 14f; hqBtns.add(bt)
+            hrow.addView(bt, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(6) })
+        }
+        paintHq(); c2.addView(hrow, lp(8)); c2.addView(tv("Higher quality takes longer and uses more storage.", 13f, MUT), lp(6))
         col.addView(c2, lp(14))
 
         val c3 = card("3 · CAPTIONS AND LAYOUT")
@@ -207,12 +241,12 @@ class MainActivity : Activity() {
     }
 
     private fun say(t: String) = runOnUiThread { status.text = t }
-    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean, count: Int, wm: String) {
+    private fun enqueue(link: String, times: List<Int>, length: Int, find: Boolean, caps: Boolean, cam: String, lang: String, blur: Boolean, count: Int, wm: String, hq: Int, brain: Boolean) {
         getSharedPreferences("clipper", 0).edit().putString("wm", wm).apply()
         if (!Regex("(youtube\\.com|youtu\\.be|twitch\\.tv)/").containsMatchIn(link)) { say("Paste a YouTube or Twitch link first."); return }
         val now = System.currentTimeMillis()
         fun entry(kind: String, start: Int, n: Int) = JSONObject().put("id", "$now-$n").put("kind", kind).put("link", link)
-            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("count", count).put("wm", wm).put("n", n + 1).put("batch", "$now").put("t0", now).put("title", "").put("state", "queued").put("note", "").put("path", "")
+            .put("start", start).put("length", length).put("caps", caps).put("cam", cam).put("lang", lang).put("blur", blur).put("count", count).put("wm", wm).put("hq", hq).put("brain", brain).put("n", n + 1).put("batch", "$now").put("t0", now).put("title", "").put("state", "queued").put("note", "").put("path", "")
         if (find) Store.add(this, entry("auto", 0, 0)) else times.forEachIndexed { i, t -> Store.add(this, entry("clip", t, i)) }
         startForegroundService(Intent(this, ClipService::class.java))
         showClips()
@@ -328,6 +362,15 @@ class MainActivity : Activity() {
             }
             clipsBox.addView(b, lpm(10))
         }
+        var nf = 0
+        for (i in 0 until a.length()) if (a.getJSONObject(i).getString("state") == "failed") nf++
+        if (nf > 0) clipsBox.addView(Button(this).apply {
+            text = "Clear failed ($nf)"; isAllCaps = false; setTextColor(Color.WHITE); background = rr(cCARD, 16)
+            setOnClickListener {
+                for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "failed") Store.remove(this@MainActivity, o.getString("id")) }
+                renderClips()
+            }
+        }, lpm(10))
     }
 
     // finished clips, grouped by video
@@ -450,7 +493,12 @@ class ClipService : Service() {
     private var lastNote = ""
     private val subsCache = HashMap<String, JSONObject?>()
 
-    private fun yt(link: String) = YoutubeDLRequest(link).apply { addOption("--force-ipv4"); addOption("--socket-timeout", "30"); addOption("--retries", "5") }
+    private fun yt(link: String) = YoutubeDLRequest(link).apply {
+        addOption("--force-ipv4"); addOption("--socket-timeout", "30"); addOption("--retries", "5")
+        addOption("--extractor-args", "youtube:player_client=android_vr,default")   // avoids the "sign in / not a bot" check in most cases
+        val ck = File(getExternalFilesDir(null), "cookies.txt")                      // optional: a cookies.txt placed here is used automatically
+        if (ck.exists()) addOption("--cookies", ck.absolutePath)
+    }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -499,19 +547,19 @@ class ClipService : Service() {
                 val link = e.getString("link"); val len = e.getInt("length")
                 if (e.getString("kind") == "auto") {
                     val subs0 = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
-                    val starts = snap(findBest(link, len, dir, subs0, e.optInt("count", 3)), subs0)
+                    val starts = snap(findBest(link, len, dir, subs0, e.optInt("count", 3), e.optBoolean("brain")), subs0)
                     if (starts.isEmpty()) Store.update(this, cur, "state" to "failed", "note" to lastNote.ifEmpty { "Nothing found" })
                     else {
                         val base = cur; cur = ""
                         Store.remove(this, base)
                         starts.forEachIndexed { i, s -> Store.add(this, JSONObject().put("id", "$base-$i").put("n", i + 1).put("batch", e.optString("batch")).put("t0", e.optLong("t0")).put("title", lastTitle).put("kind", "clip").put("link", link)
-                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("wm", e.optString("wm")).put("state", "queued").put("note", "").put("path", "")) }
+                            .put("start", s).put("length", len).put("caps", e.getBoolean("caps")).put("cam", e.optString("cam")).put("lang", e.optString("lang", "en")).put("blur", e.optBoolean("blur")).put("wm", e.optString("wm")).put("hq", e.optInt("hq", 720)).put("brain", e.optBoolean("brain")).put("state", "queued").put("note", "").put("path", "")) }
                     }
                 } else {
                     val s = e.getInt("start")
                     val subs = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
                     val want = e.getBoolean("caps"); capWhy = ""
-                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur"), e.optString("wm")) }
+                    val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur"), e.optString("wm"), e.optInt("hq", 720), e.optBoolean("brain")) }
                         catch (ex: Exception) { say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
                     val out = File(getExternalFilesDir("clips"), "$cur.mp4")
                     f.copyTo(out, true)
@@ -519,7 +567,7 @@ class ClipService : Service() {
                     Store.update(this, cur, "state" to "done", "path" to out.absolutePath, "thumb" to th.absolutePath, "finished" to System.currentTimeMillis(), "note" to ((if (caps) "with captions" else "no captions") + capWhy))
                 }
             } catch (ex: Exception) {
-                Store.update(this, cur, "state" to "failed", "note" to (ex.message ?: "error").takeLast(150))
+                Store.update(this, cur, "state" to "failed", "note" to friendly(ex.message ?: "error"))
             } finally { dir.deleteRecursively() }
         }
     }
@@ -528,17 +576,24 @@ class ClipService : Service() {
     private var capWhy = ""
     private var lastErr = ""
     private var lastTitle = ""
+    private var sf = 1f   // output size factor (1.0 = 720x1280, 1.5 = 1080x1920)
+
+    private fun friendly(m: String): String = when {
+        m.contains("Sign in") || m.contains("cookies") -> "YouTube asked for a bot check. Try Wi-Fi or another network, wait a few minutes, then tap to retry."
+        m.contains("Errno 7") || m.contains("No address") -> "Could not reach YouTube (network or DNS problem). Check your internet and retry."
+        else -> m.takeLast(150)
+    }
 
     // watermark text: light yellow-white letters with a black shadow, no background box
     private fun makeWm(text: String, dir: File): File {
-        val W = 720; val H = 90
+        val W = (720 * sf).toInt(); val H = (90 * sf).toInt()
         val bm = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888); val c = Canvas(bm)
-        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = 38f; textAlign = Paint.Align.CENTER }
-        var sz = 38f
-        while (p.measureText(text) > W - 40 && sz > 16f) { sz -= 2f; p.textSize = sz }
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = 38f * sf; textAlign = Paint.Align.CENTER }
+        var sz = 38f * sf
+        while (p.measureText(text) > W - 40 * sf && sz > 16f * sf) { sz -= 2f; p.textSize = sz }
         val y = H / 2f + p.textSize * 0.35f
-        p.style = Paint.Style.STROKE; p.strokeWidth = 7f; p.strokeJoin = Paint.Join.ROUND; p.color = 0xB3000000.toInt(); c.drawText(text, W / 2f, y, p)
-        p.style = Paint.Style.FILL; p.setShadowLayer(8f, 0f, 3f, Color.BLACK); p.color = 0xFFFFF4B0.toInt(); c.drawText(text, W / 2f, y, p)
+        p.style = Paint.Style.STROKE; p.strokeWidth = 7f * sf; p.strokeJoin = Paint.Join.ROUND; p.color = 0xB3000000.toInt(); c.drawText(text, W / 2f, y, p)
+        p.style = Paint.Style.FILL; p.setShadowLayer(8f * sf, 0f, 3f * sf, Color.BLACK); p.color = 0xFFFFF4B0.toInt(); c.drawText(text, W / 2f, y, p)
         val f = File(dir, "wm.png"); f.outputStream().use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) }
         return f
     }
@@ -611,19 +666,19 @@ class ClipService : Service() {
 
     private fun drawCap(words: List<String>, act: Int, W: Int, H: Int, out: File) {
         val bm = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888); val c = Canvas(bm)
-        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = 66f }
-        val gap = 22f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.DEFAULT_BOLD; textSize = 66f * sf }
+        val gap = 22f * sf
         fun total() = (words.sumOf { p.measureText(it).toDouble() } + gap * (words.size - 1)).toFloat()
-        if (total() > W - 40) p.textSize = 66f * (W - 40) / total()
+        if (total() > W - 40 * sf) p.textSize = 66f * sf * (W - 40 * sf) / total()
         var x = (W - total()) / 2; val y = H / 2f + p.textSize * 0.35f
         words.forEachIndexed { i, w ->
             val wd = p.measureText(w)
             if (i == act) {
                 p.style = Paint.Style.FILL; p.color = 0xFFFFD21F.toInt()
-                c.drawRoundRect(RectF(x - 14, y - p.textSize * 0.95f, x + wd + 14, y + p.textSize * 0.28f), 18f, 18f, p)
+                c.drawRoundRect(RectF(x - 14 * sf, y - p.textSize * 0.95f, x + wd + 14 * sf, y + p.textSize * 0.28f), 18f * sf, 18f * sf, p)
                 p.color = Color.BLACK; c.drawText(w, x, y, p)
             } else {
-                p.style = Paint.Style.STROKE; p.strokeWidth = 9f; p.strokeJoin = Paint.Join.ROUND; p.color = Color.BLACK; c.drawText(w, x, y, p)
+                p.style = Paint.Style.STROKE; p.strokeWidth = 9f * sf; p.strokeJoin = Paint.Join.ROUND; p.color = Color.BLACK; c.drawText(w, x, y, p)
                 p.style = Paint.Style.FILL; p.color = Color.WHITE; c.drawText(w, x, y, p)
             }
             x += wd + gap
@@ -688,7 +743,7 @@ class ClipService : Service() {
         val ws = words.filter { it.a >= 0 && it.a < len }.sortedBy { it.a }
         if (ws.isEmpty()) return null
         for (i in ws.indices) ws[i].b = if (i + 1 < ws.size) minOf(ws[i + 1].a, ws[i].a + 1.2) else ws[i].a + 0.8
-        val W = 720; val H = 170
+        val W = (720 * sf).toInt(); val H = (170 * sf).toInt()
         val blank = File(dir, "blank.png")
         Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888).let { b -> blank.outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         val sb = StringBuilder(); var t = 0.0; var n = 0
@@ -713,8 +768,8 @@ class ClipService : Service() {
 
     // Gets the exact piece of video+audio. Preferred: our own FFmpeg seeks both streams to the same second (keeps sound in sync).
     // Fallback: yt-dlp section download with forced cuts. Returns how many seconds of lead-in the file has.
-    private fun fetchRaw(link: String, s: Int, length: Int, dir: File): Int {
-        val fmtSel = "bv*[height<=720]+ba/b[height<=720]/b"
+    private fun fetchRaw(link: String, s: Int, length: Int, dir: File, hq: Int): Int {
+        val fmtSel = "bv*[height<=$hq]+ba/b[height<=$hq]/b"
         try {
             say("Getting the video address...")
             val g = yt(link); g.addOption("-g"); g.addOption("-e"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel)
@@ -741,23 +796,32 @@ class ClipService : Service() {
     }
 
     // main pipeline: download with a lead-in, then our own FFmpeg run (accurate cut, webcam layout, captions)
-    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean, lang: String, blur: Boolean, wm: String): Pair<File, Boolean> {
-        val pre = fetchRaw(link, s, length, dir)
+    private fun render2(link: String, s: Int, length: Int, dir: File, subs: JSONObject?, cam: String, want: Boolean, lang: String, blur: Boolean, wm: String, hq: Int, brain: Boolean): Pair<File, Boolean> {
+        val k = if (hq >= 1080) 1.5 else 1.0; sf = k.toFloat()
+        val OW = (720 * k).toInt(); val OH = (1280 * k).toInt(); val topH = (560 * k).toInt(); val sqH = (720 * k).toInt()
+        val pre = fetchRaw(link, s, length, dir, hq)
         val raw = dir.listFiles { x -> x.name.startsWith("raw.") && !x.name.endsWith(".part") && !x.name.endsWith(".ytdl") }?.firstOrNull()
             ?: throw RuntimeException("download failed")
-        var layout = "crop=ih*9/16:ih,scale=720:1280"; var capY = 820
-        if (cam.isEmpty() && blur) layout = "split[a][b];[a]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,boxblur=20:2[bg];[b]scale=720:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        var layout = "crop=ih*9/16:ih,scale=$OW:$OH"; var capY = (820 * k).toInt(); var camOn = false
+        if (cam.isEmpty() && blur) layout = "split[a][b];[a]scale=$OW:$OH:force_original_aspect_ratio=increase,crop=$OW:$OH,boxblur=${(20 * k).toInt()}:2[bg];[b]scale=$OW:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2"
         if (cam.isNotEmpty()) {
             say("Finding the webcam...")
             try {
                 val c = camCrop(raw, pre, length, cam)
-                layout = "split[a][b];[a]crop=${c[0]}:${c[1]}:${c[2]}:${c[3]},scale=720:560[c];[b]crop=ih:ih:(iw-ih)/2:0,scale=720:720[g];[c][g]vstack"; capY = 475
+                layout = "split[a][b];[a]crop=${c[0]}:${c[1]}:${c[2]}:${c[3]},scale=$OW:$topH[c];[b]crop=ih:ih:(iw-ih)/2:0,scale=$OW:$sqH[g];[c][g]vstack"; capY = (475 * k).toInt(); camOn = true
             } catch (e: Exception) { capWhy += " (webcam not found, pick its corner)" }
         }
         var capList: File? = null
         if (want) {
             stage(1)
-            var words: List<CapWord>? = try { voskWords(raw, pre, length, dir, lang) }
+            var words: List<CapWord>? = null
+            val key = getSharedPreferences("clipper", 0).getString("groq", "") ?: ""
+            if (brain && key.isNotBlank()) {
+                say("AI is writing the exact words...")
+                words = try { groqWords(raw, pre, length, dir, lang, key) }
+                    catch (e: Exception) { capWhy += " (AI transcription problem: ${(e.message ?: "").takeLast(50)})"; null }
+            }
+            if (words.isNullOrEmpty()) words = try { voskWords(raw, pre, length, dir, lang) }
                 catch (e: Exception) { capWhy += " (speech model problem: ${(e.message ?: "").takeLast(60)})"; null }
             if (words.isNullOrEmpty() && subs != null) words = ytWords(subs, s, length)
             stage(2)
@@ -767,7 +831,7 @@ class ClipService : Service() {
         stage(2)
         say("Rendering the clip...")
         val wmFile = if (wm.isNotBlank()) try { makeWm(wm.trim().take(32), dir) } catch (e: Exception) { null } else null
-        val wmY = if (capY == 475) 1190 else 1095   // bottom middle (a little higher on the blurred layout)
+        val wmY = ((if (camOn) 1190 else 1095) * k).toInt()   // bottom middle (a little higher on the blurred layout)
         val inputs = ArrayList<String>(listOf("-i", raw.absolutePath))
         var fc = "[0:v]trim=start=$pre,setpts=PTS-STARTPTS,$layout[base];"; var last = "base"; var idx = 1
         if (capList != null) {
@@ -780,7 +844,7 @@ class ClipService : Service() {
         }
         fc += "[$last]format=yuv420p[v];[0:a]atrim=start=$pre,asetpts=PTS-STARTPTS[a]"
         val out = File(dir, "out.mp4"); var ok = false
-        for (enc in listOf(listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "26"), listOf("-c:v", "mpeg4", "-q:v", "5"))) {
+        for (enc in listOf(listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", if (hq >= 1080) "23" else "26"), listOf("-c:v", "mpeg4", "-q:v", "5"))) {
             ok = runFfmpeg(listOf("-y") + inputs + listOf("-filter_complex", fc, "-map", "[v]", "-map", "[a]", "-t", "$length") + enc +
                 listOf("-c:a", "aac", "-movflags", "+faststart", out.absolutePath))
             if (ok) break
@@ -789,14 +853,81 @@ class ClipService : Service() {
         return Pair(out, capList != null)
     }
 
-    private fun findBest(link: String, length: Int, dir: File, subs: JSONObject?, count: Int): List<Int> {
+    // ---- AI brain (Groq, free key): exact transcription + picking the most viral moments ----
+    private fun groqWords(raw: File, pre: Int, length: Int, dir: File, lang: String, key: String): List<CapWord> {
+        val a = File(dir, "a.m4a")
+        if (!runFfmpeg(listOf("-y", "-ss", "$pre", "-i", raw.absolutePath, "-t", "$length", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "48k", a.absolutePath)))
+            throw RuntimeException("audio extract failed")
+        val boundary = "----clipper${System.currentTimeMillis()}"
+        val c = java.net.URL("https://api.groq.com/openai/v1/audio/transcriptions").openConnection() as java.net.HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 20000; c.readTimeout = 120000
+        c.setRequestProperty("Authorization", "Bearer $key"); c.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+        c.outputStream.use { o ->
+            fun field(n: String, v: String) { o.write("--$boundary\r\nContent-Disposition: form-data; name=\"$n\"\r\n\r\n$v\r\n".toByteArray()) }
+            field("model", "whisper-large-v3-turbo"); field("response_format", "verbose_json"); field("timestamp_granularities[]", "word"); field("temperature", "0")
+            when (lang) {
+                "hi" -> field("language", "hi")
+                "in" -> { field("language", "en"); field("prompt", "Namaste doston, aaj hum GTA khelenge, bahut mazaa aane wala hai.") }
+                else -> field("language", "en")
+            }
+            o.write("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.m4a\"\r\nContent-Type: audio/mp4\r\n\r\n".toByteArray())
+            a.inputStream().use { it.copyTo(o) }
+            o.write("\r\n--$boundary--\r\n".toByteArray())
+        }
+        val code = c.responseCode
+        val body = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
+        if (code !in 200..299) throw RuntimeException("Groq $code ${body.takeLast(80)}")
+        val ws = JSONObject(body).optJSONArray("words") ?: return emptyList()
+        return (0 until ws.length()).map { val o = ws.getJSONObject(it); CapWord(o.getDouble("start"), o.getDouble("end"), o.getString("word").trim().uppercase()) }.filter { it.t.isNotEmpty() }
+    }
+
+    private fun aiPick(cands: List<Int>, subs: JSONObject, len: Int, count: Int, key: String): List<Int>? {
+        val evs = subs.optJSONArray("events") ?: return null
+        val sb = StringBuilder(); var any = false
+        cands.forEachIndexed { ci, s0 ->
+            sb.append("CANDIDATE ${ci + 1} (video time ${fmt(s0)} to ${fmt(s0 + len)}):\n")
+            for (i in 0 until evs.length()) {
+                val e = evs.getJSONObject(i); val t = (e.optLong("tStartMs") / 1000).toInt()
+                if (t < s0 || t > s0 + len) continue
+                val sg = e.optJSONArray("segs") ?: continue
+                val line = (0 until sg.length()).joinToString("") { sg.getJSONObject(it).optString("utf8") }.trim()
+                if (line.isNotEmpty()) { sb.append("[$t] $line\n"); any = true }
+            }
+        }
+        if (!any) return null
+        val prompt = "You are an expert editor of viral short videos (Shorts, Reels, TikTok). Below are ${cands.size} candidate windows of $len seconds from one video. " +
+            "Each line starts with [second] counted from the video start. Choose the best $count candidates for a viral clip: a strong hook in the first 3 seconds, emotion, humor, surprise, a complete mini-story. " +
+            "For each pick give the start second where the clip should begin so the hook comes first (use a second inside that candidate). " +
+            "Reply ONLY with JSON like {\"clips\":[{\"candidate\":1,\"start\":123}]}\n\n$sb"
+        val body = JSONObject().put("model", "llama-3.3-70b-versatile").put("temperature", 0.3)
+            .put("response_format", JSONObject().put("type", "json_object"))
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+        val c = java.net.URL("https://api.groq.com/openai/v1/chat/completions").openConnection() as java.net.HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 20000; c.readTimeout = 60000
+        c.setRequestProperty("Authorization", "Bearer $key"); c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toString().toByteArray()) }
+        if (c.responseCode !in 200..299) return null
+        val txt = JSONObject(c.inputStream.bufferedReader().readText()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+        val arr = JSONObject(txt).getJSONArray("clips")
+        val out = ArrayList<Int>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i); val ci = o.optInt("candidate", 0) - 1
+            if (ci !in cands.indices) continue
+            val st = o.optInt("start", cands[ci]).coerceIn(cands[ci], cands[ci] + len / 2)
+            if (out.none { abs(it - st) < len }) out.add(st)
+            if (out.size == count) break
+        }
+        return out.sorted()
+    }
+
+    private fun findBest(link: String, length: Int, dir: File, subs: JSONObject?, count: Int, brain: Boolean): List<Int> {
         say("Scanning the video for hyped moments")
         val r = yt(link)
         r.addOption("--dump-single-json"); r.addOption("--no-playlist"); r.addOption("--skip-download")
         val info = JSONObject(YoutubeDL.getInstance().execute(r).out)
         val dur = info.optDouble("duration", 0.0).toInt()
         lastTitle = info.optString("title")
-        if (dur < length * 2) { say("Can't scan this one (live right now, or too short). Try again after the stream ends."); return emptyList() }
+        if (dur < length * 2) { say(if (info.optBoolean("is_live")) "This stream is still live. Auto-find works after it ends (or type your own moments)." else "Could not read this video's length, or it is too short."); return emptyList() }
         val score = DoubleArray(dur + 1)
         val hm = info.optJSONArray("heatmap")
         if (hm != null && hm.length() > 0) {            // YouTube "Most replayed" data
@@ -826,6 +957,13 @@ class ClipService : Service() {
                 val sec = (o.optLong("tStartMs") / 1000).toInt()
                 if (c > 0 && sec in score.indices) score[sec] += 0.35 * c
             }
+        }
+        val key = getSharedPreferences("clipper", 0).getString("groq", "") ?: ""
+        if (brain && key.isNotBlank() && subs != null) {
+            val cands = pick(score, length, minOf(10, count * 3))
+            say("AI is judging the best moments...")
+            val ai = try { aiPick(cands, subs, length, count, key) } catch (e: Exception) { null }
+            if (!ai.isNullOrEmpty()) return ai
         }
         return pick(score, length, count)
     }
