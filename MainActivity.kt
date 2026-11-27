@@ -115,7 +115,7 @@ class MainActivity : Activity() {
             ((mBox.getChildAt(it) as LinearLayout).getChildAt(0) as EditText).text.toString().trim().ifEmpty { null } }.map { secs(it) }
 
         go = btn("Create", ACC, WHITE) {
-            try { val t = times(); prefs.edit().putString("groq", keyField.text.toString().trim()).putBoolean("brain", brainSw.isChecked).apply(); enqueue(link.text.toString().trim(), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count, wmField.text.toString().trim(), hq, brainSw.isChecked) }
+            try { val t = times(); prefs.edit().putString("groq", keyField.text.toString().trim()).putBoolean("brain", brainSw.isChecked).apply(); enqueue(cleanLink(link.text.toString().trim()), t, length, t.isEmpty(), cap.isChecked, camMode, lang, blur, count, wmField.text.toString().trim(), hq, brainSw.isChecked) }
             catch (e: Exception) { say("Moments must look like 14742 or 1:47:42.") }
         }
         val top = LinearLayout(this)
@@ -148,6 +148,14 @@ class MainActivity : Activity() {
         cAI.addView(brainStatus, lp(8))
         cAI.addView(btn("Get a free key: console.groq.com/keys", 0, ACC) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://console.groq.com/keys"))) }, lp(4))
         col.addView(cAI, lp(10))
+
+        val cYT = card("YOUTUBE BOT-CHECK FIX (OPTIONAL)")
+        cYT.addView(tv("If YouTube keeps saying 'confirm you are not a bot', sign in once. Use a spare Google account, not your main one. The login stays only on this phone.", 13f, MUT), lp(8))
+        val ytStatus = tv(if (File(getExternalFilesDir(null), "cookies.txt").exists()) "Signed in." else "Not signed in.", 13f, MUT)
+        cYT.addView(btn("Sign in to YouTube", FIELD, WHITE) { loginYouTube { ytStatus.text = "Signed in." } }, lp(10))
+        cYT.addView(btn("Remove login", 0, ACC) { File(getExternalFilesDir(null), "cookies.txt").delete(); ytStatus.text = "Not signed in." }, lp(4))
+        cYT.addView(ytStatus, lp(4))
+        col.addView(cYT, lp(10))
 
         val c1 = card("1 · STREAM LINK")
         val lr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -308,20 +316,21 @@ class MainActivity : Activity() {
         }
         clipsBox.removeAllViews()
         if (batch.isNotEmpty()) {
-            var total = 0; var done = 0; var curE: JSONObject? = null; var t0 = now
+            var total = 0; var done = 0; var curE: JSONObject? = null; var t0 = now; var qn = ""
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i); if (o.optString("batch") != batch) continue
                 t0 = minOf(t0, o.optLong("t0", now))
                 total += if (o.getString("kind") == "auto") o.optInt("count", 3) else 1
                 if (o.getString("state") == "done") done++
                 if (o.getString("state") == "working") curE = o
+                if (o.getString("state") == "queued" && qn.isEmpty()) qn = o.optString("note")
             }
             val ce = curE
             val st = ce?.optInt("stage", 0) ?: 0
             val frac = if (ce == null) 0.0 else if (ce.getString("kind") == "auto") 0.05 else listOf(0.15, 0.55, 0.85)[st.coerceIn(0, 2)]
             val pct = (((done + frac) / maxOf(total, 1)) * 100).toInt().coerceIn(0, 99)
             val el = (now - t0) / 1000
-            val note = ce?.optString("note") ?: "Waiting in line..."
+            val note = ce?.optString("note") ?: qn.ifEmpty { "Waiting in line..." }
             val c = card(); c.gravity = Gravity.CENTER_HORIZONTAL
             c.addView(TextView(this).apply {
                 text = "${el}s"; textSize = 26f; setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
@@ -435,6 +444,39 @@ class MainActivity : Activity() {
         return c
     }
 
+    // youtu.be/..., /live/..., /shorts/... all become the plain watch link (YouTube checks these links less strictly)
+    private fun cleanLink(l: String): String {
+        val m = Regex("(?:v=|youtu\\.be/|/live/|/shorts/|/embed/)([A-Za-z0-9_-]{11})").find(l)
+        return if (m != null && l.contains("youtu")) "https://www.youtube.com/watch?v=${m.groupValues[1]}" else l
+    }
+
+    private fun loginYouTube(onDone: () -> Unit) {
+        val wv = android.webkit.WebView(this)
+        wv.settings.javaScriptEnabled = true; wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+        wv.webViewClient = android.webkit.WebViewClient()
+        wv.loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fm.youtube.com%2F")
+        val d = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val bar = Button(this).apply { text = "Done: save my login"; setOnClickListener { saveCookies(); d.dismiss(); onDone() } }
+        d.setContentView(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(bar); addView(wv, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)) })
+        d.show()
+    }
+
+    private fun saveCookies() {
+        val cm = android.webkit.CookieManager.getInstance(); cm.flush()
+        val sb = StringBuilder("# Netscape HTTP Cookie File\n")
+        for ((url, dom) in listOf("https://www.youtube.com" to ".youtube.com", "https://m.youtube.com" to ".youtube.com", "https://accounts.google.com" to ".google.com")) {
+            val raw = cm.getCookie(url) ?: continue
+            for (kv in raw.split(";")) {
+                val i = kv.indexOf('='); if (i < 1) continue
+                sb.append("$dom\tTRUE\t/\tTRUE\t2147483647\t${kv.substring(0, i).trim()}\t${kv.substring(i + 1).trim()}\n")
+            }
+        }
+        File(getExternalFilesDir(null), "cookies.txt").writeText(sb.toString())
+        Toast.makeText(this, "Login saved on this phone", Toast.LENGTH_LONG).show()
+    }
+
     private fun play(path: String) {
         val vv = VideoView(this); vv.setVideoPath(path)
         vv.setMediaController(MediaController(this).also { it.setAnchorView(vv) })
@@ -480,8 +522,14 @@ object Store {
     }
     @Synchronized fun nextQueued(c: Context): JSONObject? {
         val a = all(c)
-        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "queued") return o }
+        val now = System.currentTimeMillis()
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("state") == "queued" && o.optLong("wait", 0L) <= now) return o }
         return null
+    }
+    @Synchronized fun hasWaiting(c: Context): Boolean {
+        val a = all(c)
+        for (i in 0 until a.length()) if (a.getJSONObject(i).getString("state") == "queued") return true
+        return false
     }
 }
 
@@ -495,9 +543,9 @@ class ClipService : Service() {
 
     private fun yt(link: String) = YoutubeDLRequest(link).apply {
         addOption("--force-ipv4"); addOption("--socket-timeout", "30"); addOption("--retries", "5")
-        addOption("--extractor-args", "youtube:player_client=android_vr,default")   // avoids the "sign in / not a bot" check in most cases
-        val ck = File(getExternalFilesDir(null), "cookies.txt")                      // optional: a cookies.txt placed here is used automatically
+        val ck = File(getExternalFilesDir(null), "cookies.txt")                      // saved by the "Sign in to YouTube" button
         if (ck.exists()) addOption("--cookies", ck.absolutePath)
+        else addOption("--extractor-args", "youtube:player_client=${clients[clientIdx]}")   // another way to ask YouTube each time one gets the bot check
     }
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -539,11 +587,14 @@ class ClipService : Service() {
             updated = true
         }
         while (true) {
-            val e = Store.nextQueued(this) ?: break
+            val e = Store.nextQueued(this) ?: if (Store.hasWaiting(this)) { Thread.sleep(5000); continue } else break
             cur = e.getString("id"); lastNote = ""
             Store.update(this, cur, "state" to "working", "note" to "Starting"); curStage = -1; stage(0)
             val dir = File(getExternalFilesDir(null), "work/$cur").apply { deleteRecursively(); mkdirs() }
+            var attempt = 0; val startClient = clientIdx
+            while (true) {
             try {
+                clientIdx = (startClient + attempt) % clients.size
                 val link = e.getString("link"); val len = e.getInt("length")
                 if (e.getString("kind") == "auto") {
                     val subs0 = if (e.getBoolean("caps")) { if (!subsCache.containsKey(link)) subsCache[link] = fetchSubs(link, dir); subsCache[link] } else null
@@ -566,9 +617,18 @@ class ClipService : Service() {
                     val th = File(getExternalFilesDir("clips"), "$cur.jpg"); thumb(f, th)
                     Store.update(this, cur, "state" to "done", "path" to out.absolutePath, "thumb" to th.absolutePath, "finished" to System.currentTimeMillis(), "note" to ((if (caps) "with captions" else "no captions") + capWhy))
                 }
+                break
             } catch (ex: Exception) {
-                Store.update(this, cur, "state" to "failed", "note" to friendly(ex.message ?: "error"))
-            } finally { dir.deleteRecursively() }
+                val m = ex.message ?: ""
+                if (isBot(m) && attempt < clients.size - 1) { attempt++; say("YouTube check: trying another way (${attempt + 1}/${clients.size})..."); continue }
+                val tries = e.optInt("tries", 0)
+                if (isNet(m)) Store.update(this, cur, "state" to "queued", "wait" to System.currentTimeMillis() + 20_000L, "note" to "Waiting for internet...")
+                else if (isBot(m) && tries < 3) Store.update(this, cur, "state" to "queued", "tries" to tries + 1, "wait" to System.currentTimeMillis() + 90_000L, "note" to "YouTube check. Trying again in a minute...")
+                else Store.update(this, cur, "state" to "failed", "note" to friendly(m))
+                break
+            }
+            }
+            dir.deleteRecursively()
         }
     }
 
@@ -576,10 +636,15 @@ class ClipService : Service() {
     private var capWhy = ""
     private var lastErr = ""
     private var lastTitle = ""
+    private var clientIdx = 0
+    private val clients = listOf("android_vr", "tv", "web_embedded", "mweb,web_safari", "default")
+    private fun isBot(m: String) = m.contains("Sign in") || m.contains("not a bot") || m.contains("cookies")
+    private fun isNet(m: String) = m.contains("Errno 7") || m.contains("Errno 101") || m.contains("No address") || m.contains("Unable to resolve") ||
+        m.contains("UnknownHost") || m.contains("timed out") || m.contains("unreachable") || m.contains("Failed to resolve") || m.contains("Temporary failure")
     private var sf = 1f   // output size factor (1.0 = 720x1280, 1.5 = 1080x1920)
 
     private fun friendly(m: String): String = when {
-        m.contains("Sign in") || m.contains("cookies") -> "YouTube asked for a bot check. Try Wi-Fi or another network, wait a few minutes, then tap to retry."
+        isBot(m) -> "YouTube kept asking for a bot check, even after trying every way. Use the Sign in to YouTube button once, or retry later."
         m.contains("Errno 7") || m.contains("No address") -> "Could not reach YouTube (network or DNS problem). Check your internet and retry."
         else -> m.takeLast(150)
     }
