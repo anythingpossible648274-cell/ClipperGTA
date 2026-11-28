@@ -541,8 +541,9 @@ class ClipService : Service() {
     private var lastNote = ""
     private val subsCache = HashMap<String, JSONObject?>()
 
-    private fun yt(link: String) = YoutubeDLRequest(link).apply {
-        addOption("--force-ipv4"); addOption("--socket-timeout", "30"); addOption("--retries", "5")
+    private fun yt(link: String, v4: Boolean = true) = YoutubeDLRequest(link).apply {
+        if (v4) addOption("--force-ipv4")
+        addOption("--socket-timeout", "30"); addOption("--retries", "5")
         val ck = File(getExternalFilesDir(null), "cookies.txt")                      // saved by the "Sign in to YouTube" button
         if (ck.exists()) addOption("--cookies", ck.absolutePath)
         else addOption("--extractor-args", "youtube:player_client=${clients[clientIdx]}")   // another way to ask YouTube each time one gets the bot check
@@ -611,7 +612,10 @@ class ClipService : Service() {
                     val subs = if (e.getBoolean("caps")) subsCache[link] else null
                     val want = e.getBoolean("caps"); capWhy = ""
                     val (f, caps) = try { render2(link, s, len, dir, subs, e.optString("cam"), want, e.optString("lang", "en"), e.optBoolean("blur"), e.optString("wm"), e.optInt("hq", 720), e.optBoolean("brain")) }
-                        catch (ex: Exception) { say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
+                        catch (ex: Exception) {
+                            val em = ex.message ?: ""
+                            if (isBot(em) || isFmt(em) || isForb(em) || isNet(em)) throw ex
+                            say("Trying the simple method..."); capWhy = " (simple method)"; render(link, 0, s, len, dir, subs) }
                     val out = File(getExternalFilesDir("clips"), "$cur.mp4")
                     f.copyTo(out, true)
                     val th = File(getExternalFilesDir("clips"), "$cur.jpg"); thumb(f, th)
@@ -620,7 +624,7 @@ class ClipService : Service() {
                 break
             } catch (ex: Exception) {
                 val m = ex.message ?: ""
-                if ((isBot(m) || isFmt(m)) && attempt < clients.size - 1) { attempt++; say("YouTube check: trying another way (${attempt + 1}/${clients.size})..."); continue }
+                if ((isBot(m) || isFmt(m) || isForb(m)) && attempt < clients.size - 1) { attempt++; say("YouTube check: trying another way (${attempt + 1}/${clients.size})..."); continue }
                 val tries = e.optInt("tries", 0)
                 if (isNet(m)) Store.update(this, cur, "state" to "queued", "wait" to System.currentTimeMillis() + 20_000L, "note" to "Waiting for internet...")
                 else if (isBot(m) && tries < 3) Store.update(this, cur, "state" to "queued", "tries" to tries + 1, "wait" to System.currentTimeMillis() + 90_000L, "note" to "YouTube check. Trying again in a minute...")
@@ -638,6 +642,8 @@ class ClipService : Service() {
     private var lastTitle = ""
     private val urlCache = HashMap<String, Pair<List<String>, String>>()
     private var clientIdx = 0
+    private var v4Pref = false   // which internet address type (IPv6/IPv4) last worked for downloading
+    private fun isForb(m: String) = m.contains("403") || m.contains("Forbidden")
     private val clients = listOf("android_vr", "tv", "web_embedded", "mweb,web_safari", "default")
     private fun isFmt(m: String) = m.contains("Requested format is not available")
     private fun isBot(m: String) = m.contains("Sign in") || m.contains("not a bot") || m.contains("cookies")
@@ -646,6 +652,7 @@ class ClipService : Service() {
     private var sf = 1f   // output size factor (1.0 = 720x1280, 1.5 = 1080x1920)
 
     private fun friendly(m: String): String = when {
+        isForb(m) -> "YouTube refused the video download (403) even after trying every way. Tap to retry later, or use the Sign in to YouTube button."
         isFmt(m) -> "YouTube gave no downloadable video format for this link, even after trying every way. Use the Sign in to YouTube button once, or try another video."
         isBot(m) -> "YouTube kept asking for a bot check, even after trying every way. Use the Sign in to YouTube button once, or retry later."
         m.contains("Errno 7") || m.contains("No address") -> "Could not reach YouTube (network or DNS problem). Check your internet and retry."
@@ -838,38 +845,45 @@ class ClipService : Service() {
     // Fallback: yt-dlp section download with forced cuts. Returns how many seconds of lead-in the file has.
     private fun fetchRaw(link: String, s: Int, length: Int, dir: File, hq: Int): Int {
         val fmtSel = "bv*+ba/b"
-        try {
+        for (v4 in listOf(v4Pref, !v4Pref)) try {
             val urls: List<String>
-            val hit = urlCache["$link|$hq"]
+            val hit = urlCache["$link|$hq|$v4"]
             if (hit != null) {
                 urls = hit.first
                 if (hit.second.isNotEmpty() && cur.isNotEmpty()) Store.update(this, cur, "title" to hit.second)
             } else {
                 say("Getting the video address...")
-                val g = yt(link); g.addOption("-g"); g.addOption("-e"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel); g.addOption("-S", "res:$hq")
+                val g = yt(link, v4); g.addOption("-g"); g.addOption("-e"); g.addOption("--no-playlist"); g.addOption("-f", fmtSel); g.addOption("-S", "res:$hq")
                 val lines = YoutubeDL.getInstance().execute(g).out.lines().map { it.trim() }.filter { it.isNotEmpty() }
                 urls = lines.filter { it.startsWith("http") }
                 val t = lines.firstOrNull { !it.startsWith("http") } ?: ""
                 if (t.isNotEmpty() && cur.isNotEmpty()) Store.update(this, cur, "title" to t)
                 if (urls.isEmpty()) throw RuntimeException("no address")
-                urlCache["$link|$hq"] = Pair(urls, t)
+                urlCache["$link|$hq|$v4"] = Pair(urls, t)
             }
             say("Cutting the clip...")
             val raw = File(dir, "raw.mp4")
             val maps = if (urls.size > 1) listOf("-map", "0:v:0", "-map", "1:a:0") else listOf("-map", "0:v:0", "-map", "0:a:0?")
             val ok = runFfmpeg(listOf("-y") + urls.flatMap { listOf("-ss", s.toString(), "-i", it) } + listOf("-t", "$length") + maps +
                 listOf("-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-r", "30", "-c:a", "aac", raw.absolutePath))
-            if (ok && raw.length() > 10000) return 0
-            raw.delete()
-        } catch (e: Exception) { File(dir, "raw.mp4").delete(); urlCache.remove("$link|$hq") }
+            if (ok && raw.length() > 10000) { v4Pref = v4; return 0 }
+            raw.delete(); urlCache.remove("$link|$hq|$v4")
+        } catch (e: Exception) { File(dir, "raw.mp4").delete(); urlCache.remove("$link|$hq|$v4") }
         val pre = minOf(20, s)
         say("Downloading the clip (slower method)...")
-        val req = yt(link)
-        req.addOption("-f", fmtSel); req.addOption("-S", "res:$hq"); req.addOption("--merge-output-format", "mkv")
-        req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}"); req.addOption("--force-keyframes-at-cuts")
-        req.addOption("-o", "${dir.absolutePath}/raw.%(ext)s")
-        YoutubeDL.getInstance().execute(req) { p, _, _ -> say("Downloading the clip... ${p.toInt().coerceAtLeast(0)}%") }
-        return pre
+        var lastEx: Exception? = null
+        for (v4 in listOf(v4Pref, !v4Pref)) {
+            try {
+                val req = yt(link, v4)
+                req.addOption("-f", fmtSel); req.addOption("-S", "res:$hq"); req.addOption("--merge-output-format", "mkv")
+                req.addOption("--download-sections", "*${fmt(s - pre)}-${fmt(s + length)}"); req.addOption("--force-keyframes-at-cuts")
+                req.addOption("-o", "${dir.absolutePath}/raw.%(ext)s")
+                YoutubeDL.getInstance().execute(req) { p, _, _ -> say("Downloading the clip... ${p.toInt().coerceAtLeast(0)}%") }
+                v4Pref = v4
+                return pre
+            } catch (e: Exception) { lastEx = e; dir.listFiles { x -> x.name.startsWith("raw.") }?.forEach { it.delete() } }
+        }
+        throw lastEx ?: RuntimeException("download failed")
     }
 
     // main pipeline: download with a lead-in, then our own FFmpeg run (accurate cut, webcam layout, captions)
